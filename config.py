@@ -30,4 +30,9 @@ INPUT_RATE = 16000
 OUTPUT_RATE = 24000
 
 CHANNELS = 1
-BLOCKSIZE = 1600
+
+# Gemini Live khuyến nghị chunk audio realtime khoảng 20–40 ms.
+# 16 kHz × 40 ms = 640 frames.
+# Giữ các thông số khác nguyên trạng, chỉ giảm block để giảm latency
+# và giúp VAD nhận giọng nói ổn định hơn.
+BLOCKSIZE = 640
