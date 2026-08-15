@@ -4,7 +4,7 @@
 
 import asyncio
 
-from live_voice_fixed import (
+from live_voice import (
     start_live_voice,
     cleanup,
 )
