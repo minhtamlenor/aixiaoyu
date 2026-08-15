@@ -84,10 +84,11 @@ def main() -> None:
         "interrupted input handling",
     )
 
-    # Safety check: no conflict markers and valid Python before writing.
-    for marker in ("<<<<<<<", "=======", ">>>>>>>"):
-        if marker in text:
-            raise RuntimeError(f"Phát hiện merge-conflict marker: {marker}")
+    # Safety check: only reject actual Git conflict markers.
+    # A line consisting of ======= may legitimately occur in source
+    # comments/docstrings, so it is not sufficient evidence of a conflict.
+    if "<<<<<<< " in text or ">>>>>>> " in text:
+        raise RuntimeError("Phát hiện merge-conflict marker trong origin/main")
 
     compile(text, str(TARGET), "exec")
     TARGET.write_text(text, encoding="utf-8", newline="\n")
