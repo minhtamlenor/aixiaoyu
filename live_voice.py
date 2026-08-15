@@ -462,8 +462,6 @@ async def send_startup_greeting(session):
 
     startup_greeting_sent = True
 
-    # Không khóa câu chào vào một câu cứng.
-    # Personality.py đã là nguồn tính cách chính của Tiểu Vũ.
     prompt = f"""
 Tiểu Vũ vừa kết nối với Lão sư Minh Tâm.
 {time_hint}
@@ -477,7 +475,6 @@ Không kết thúc cuộc trò chuyện sau lời chào; sau khi chào hãy ti�
 """
 
     try:
-        # Không suppress transcript ở startup để không nuốt câu nói đầu tiên của Lão sư.
         command_suppressed_until = 0.0
         await session.send_realtime_input(text=prompt)
     except Exception as e:
@@ -611,7 +608,6 @@ async def start_tutor_session(session, student, subject=None, switching=False):
     print("👤", current_student, flush=True)
     print("📚", SUBJECT_NAMES.get(selected_subject, selected_subject), flush=True)
 
-    # Dùng lesson flow hiện có để tạo câu hỏi đầu tiên.
     try:
         question_speech = await start_voice_lesson(
             student,
@@ -646,7 +642,6 @@ Sau khi hỏi xong, chờ {current_student} trả lời.
             flush=True,
         )
 
-    # Fallback tối thiểu: giữ hành vi Tutor cũ nếu lesson flow gặp lỗi.
     prompt = f"""
 TUTOR MODE.
 
@@ -762,7 +757,6 @@ async def process_user_text(session, text):
 
     print("\n👤 Người nói:", text, flush=True)
 
-    # Tạm biệt/dừng phiên phải được xử lý trước answer của lesson flow.
     if detect_farewell(text):
         await exit_tutor_mode(session)
         return
@@ -771,8 +765,6 @@ async def process_user_text(session, text):
     intent = command["intent"]
     student = command["student"]
     subject = command["subject"]
-
-    # "Lão sư" là cách xưng hô, không phải lệnh chuyển mode.
 
     if intent == "start_lesson":
         if tutor_mode and current_student_id == student["student_id"]:
@@ -828,7 +820,6 @@ Hỏi tự nhiên một câu ngắn:
         )
         return
 
-    # Nếu đang có câu hỏi lesson flow, câu nói này là câu trả lời của bé.
     if tutor_mode and lesson_session and lesson_waiting_for_answer:
         handled = await process_lesson_answer(
             session,
@@ -883,23 +874,48 @@ async def handle_tool_call(session, function_calls):
 # ============================================================
 
 async def microphone_sender(session):
+    """Capture microphone audio in the sounddevice thread and send it
+    sequentially from the asyncio event loop. This avoids creating a new
+    network coroutine for every callback block and prevents silent failures.
+    """
     loop = asyncio.get_running_loop()
+    audio_queue = asyncio.Queue(maxsize=20)
+
+    def enqueue_audio(data):
+        if shutdown_requested:
+            return
+        try:
+            audio_queue.put_nowait(data)
+        except asyncio.QueueFull:
+            # Drop the oldest latency rather than allowing an ever-growing queue.
+            try:
+                audio_queue.get_nowait()
+                audio_queue.put_nowait(data)
+            except asyncio.QueueEmpty:
+                pass
 
     def callback(indata, frames, time_info, status):
         if status:
             print("MIC:", status, flush=True)
+        try:
+            loop.call_soon_threadsafe(enqueue_audio, indata.tobytes())
+        except Exception as e:
+            print("⚠️ MIC callback lỗi:", repr(e), flush=True)
 
-        future = asyncio.run_coroutine_threadsafe(
-            session.send_realtime_input(
-                audio=types.Blob(
-                    data=indata.tobytes(),
-                    mime_type="audio/pcm;rate=16000",
+    async def sender():
+        while not shutdown_requested:
+            data = await audio_queue.get()
+            try:
+                await session.send_realtime_input(
+                    audio=types.Blob(
+                        data=data,
+                        mime_type="audio/pcm;rate=16000",
+                    )
                 )
-            ),
-            loop,
-        )
-
-        future.add_done_callback(lambda f: None)
+            except Exception as e:
+                print("⚠️ MIC gửi audio lỗi:", repr(e), flush=True)
+                # Do not kill the microphone task on one failed packet.
+                await asyncio.sleep(0.05)
 
     with sd.InputStream(
         device=MIC,
@@ -909,8 +925,8 @@ async def microphone_sender(session):
         blocksize=BLOCKSIZE,
         callback=callback,
     ):
-        while not shutdown_requested:
-            await asyncio.sleep(0.1)
+        print("🎤 Microphone sẵn sàng.", flush=True)
+        await sender()
 
 
 # ============================================================
@@ -964,6 +980,10 @@ async def receive_loop(session, speaker):
         if not server:
             continue
 
+        if getattr(server, "interrupted", False):
+            print("🛑 Tiểu Vũ bị Lão sư ngắt lời.", flush=True)
+            continue
+
         input_text = getattr(
             getattr(server, "input_transcription", None),
             "text",
@@ -994,7 +1014,9 @@ async def receive_loop(session, speaker):
 
                 if data:
                     try:
-                        speaker.write(data)
+                        # sounddevice.write() is blocking; keep it off the
+                        # asyncio loop so microphone/network traffic can flow.
+                        await asyncio.to_thread(speaker.write, data)
                     except Exception as e:
                         print("⚠️ Speaker lỗi:", repr(e), flush=True)
 
@@ -1110,11 +1132,21 @@ async def run_one_connection():
         ) as session:
             print("✅ Gemini Live connected", flush=True)
 
+            # Keep both realtime pipelines alive before asking Gemini to speak.
+            receive_task = asyncio.create_task(
+                receive_loop(session, speaker)
+            )
+            microphone_task = asyncio.create_task(
+                microphone_sender(session)
+            )
+
+            # Give sounddevice and the receive loop a moment to initialize.
+            await asyncio.sleep(0.25)
             await send_startup_greeting(session)
 
             await asyncio.gather(
-                receive_loop(session, speaker),
-                microphone_sender(session),
+                receive_task,
+                microphone_task,
             )
     finally:
         close_speaker()
