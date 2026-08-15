@@ -1,0 +1,29 @@
+{
+    "nha_tien:math": {
+        "student_id": "nha_tien",
+        "student_name": "Nguyễn Ngô Nhã Tiên",
+        "nickname": "Nguyễn Ngô Nhã Tiên",
+        "subject_id": "math",
+        "subject_name": "Toán",
+        "questions": 9,
+        "correct": 7,
+        "wrong": 2,
+        "hints": 1,
+        "activities": 0,
+        "accuracy": 77.8,
+        "strengths": [],
+        "weaknesses": [],
+        "topics": {
+            "addition": {
+                "questions": 9,
+                "correct": 7,
+                "wrong": 2
+            }
+        },
+        "recent_lessons": [],
+        "emotion": "unknown",
+        "engagement": "unknown",
+        "last_activity": "2026-08-15 13:46:34",
+        "level": "elementary"
+    }
+}

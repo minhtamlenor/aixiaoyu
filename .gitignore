@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+*.wav
+*.mp3
+
+.env
+
+.vscode/
+.idea/
+
+config_secret.py
