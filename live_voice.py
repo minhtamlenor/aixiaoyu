@@ -238,9 +238,9 @@ SUBJECT_PATTERNS = {
     "english": ["tiếng anh", "english"],
     "history": ["lịch sử", "history"],
     "geography": ["địa lý", "geography"],
-    "communication": ["giao tiếp", "communication"],
+    "eq": ["giao tiếp", "communication", "eq"],
     "problem_solving": ["xử lý vấn đề", "giải quyết vấn đề", "problem solving"],
-    "emotional_intelligence": ["cảm xúc", "quản lý cảm xúc", "eq"],
+    "emotional_management": ["cảm xúc", "quản lý cảm xúc", "quản lý cảm xúc", "emotional management"],
 }
 
 
@@ -314,9 +314,10 @@ def mentions_teacher(text):
 # SUBJECT ROTATION
 # ============================================================
 
+# Phải dùng đúng ID của tutor/curriculum.py hiện có.
 SUBJECT_ROTATION = [
     "chinese", "math", "vietnamese", "english", "history",
-    "geography", "communication", "problem_solving", "emotional_intelligence",
+    "geography", "eq", "problem_solving", "emotional_management",
 ]
 
 SUBJECT_NAMES = {
@@ -326,9 +327,9 @@ SUBJECT_NAMES = {
     "english": "Tiếng Anh",
     "history": "Lịch sử",
     "geography": "Địa lý",
-    "communication": "Kỹ năng giao tiếp",
-    "problem_solving": "Kỹ năng xử lý vấn đề",
-    "emotional_intelligence": "EQ và quản lý cảm xúc",
+    "eq": "Kỹ năng EQ và giao tiếp",
+    "problem_solving": "Kỹ năng giải quyết vấn đề",
+    "emotional_management": "Quản lý cảm xúc",
 }
 
 
@@ -340,8 +341,7 @@ def choose_subject(subject=None):
         last_subject = subject
         return subject
 
-    # Không có môn cụ thể: dùng luân phiên các môn đã có.
-    # Không tạo môn mới và không thay đổi curriculum hiện tại.
+    # Không có môn cụ thể: dùng luân phiên các môn đã có trong curriculum.
     if last_subject in SUBJECT_ROTATION:
         start = SUBJECT_ROTATION.index(last_subject) + 1
         rotation_index = start % len(SUBJECT_ROTATION)
@@ -409,8 +409,8 @@ def detect_tutor_command(text):
     subject = detect_subject(text)
     learning = detect_learning_intent(text)
 
-    if mentions_teacher(text):
-        return {"intent": "chat", "student": None, "subject": None}
+    # "Lão sư" chỉ là cách xưng hô với Minh Tâm, không phải lệnh thoát.
+    # Việc kết thúc phiên chỉ do detect_farewell() quyết định.
 
     if student and learning:
         return {"intent": "start_lesson", "student": student, "subject": subject}
@@ -448,6 +448,7 @@ async def send_text_command(session, text, suppress_seconds=3):
 
 async def send_startup_greeting(session):
     global startup_greeting_sent
+    global command_suppressed_until
 
     if startup_greeting_sent:
         return
@@ -455,21 +456,33 @@ async def send_startup_greeting(session):
     hour = datetime.now().hour
 
     if hour < 7:
-        greeting = "Chào buổi sáng Lão sư!"
+        time_hint = "Đây là buổi sáng sớm."
     else:
-        greeting = "Chào Lão sư!"
+        time_hint = ""
 
     startup_greeting_sent = True
 
-    await send_text_command(
-        session,
-        f"""
-Hãy chủ động chào Lão sư bằng đúng câu này:
-{greeting}
-Chỉ nói câu chào. Không hỏi thêm câu nào.
-""",
-        3,
-    )
+    # Không khóa câu chào vào một câu cứng.
+    # Personality.py đã là nguồn tính cách chính của Tiểu Vũ.
+    prompt = f"""
+Tiểu Vũ vừa kết nối với Lão sư Minh Tâm.
+{time_hint}
+
+Hãy chủ động mở đầu cuộc trò chuyện bằng một lời chào tự nhiên, thân thiện,
+vui vẻ đúng tính cách Tiểu Vũ trong personality.py.
+Nếu là trước 07:00, chào buổi sáng Lão sư một cách tự nhiên.
+Có thể hỏi thăm Lão sư một câu ngắn hoặc nói một câu vui nhẹ để mở chuyện.
+Không nói về hệ thống, Python, prompt hay chế độ kỹ thuật.
+Không kết thúc cuộc trò chuyện sau lời chào; sau khi chào hãy tiếp tục ở trạng thái CHAT MODE và chờ Lão sư nói.
+"""
+
+    try:
+        # Không suppress transcript ở startup để không nuốt câu nói đầu tiên của Lão sư.
+        command_suppressed_until = 0.0
+        await session.send_realtime_input(text=prompt)
+    except Exception as e:
+        print("⚠️ Startup greeting lỗi:", repr(e), flush=True)
+        startup_greeting_sent = False
 
 
 # ============================================================
@@ -542,7 +555,10 @@ async def process_lesson_answer(session, text):
 Sau đó hỏi ngay câu tiếp theo:
 {next_speech}
 
-Chỉ nói feedback ngắn và câu hỏi tiếp theo. Dừng.
+Giữ giọng cô gia sư thân thiện, hoà nhã, khích lệ.
+Không nói về hệ thống.
+Không đổi học sinh hoặc môn.
+Chỉ nói feedback tự nhiên rồi hỏi câu tiếp theo.
 """,
             3,
         )
@@ -608,17 +624,16 @@ async def start_tutor_session(session, student, subject=None, switching=False):
 TUTOR MODE.
 
 Python đã xác định học sinh: {current_student}
-Lớp: {grade}
 Môn hiện tại: {SUBJECT_NAMES.get(selected_subject, selected_subject)}
 
 Lesson flow đã tạo câu hỏi đầu tiên:
 {question_speech}
 
-Hãy nói lời chào rất ngắn với {current_student}, sau đó đọc đúng câu hỏi trên.
+Hãy chào {current_student} thật tự nhiên, vui vẻ và khích lệ, sau đó đọc đúng câu hỏi trên.
 Không tự đổi học sinh.
 Không tự đổi môn.
-Không thêm câu hỏi khác.
-Dừng sau câu hỏi.
+Không thêm câu hỏi khác ngoài câu hỏi của lesson flow.
+Sau khi hỏi xong, chờ {current_student} trả lời.
 """,
             4,
         )
@@ -645,16 +660,15 @@ Môn: {SUBJECT_NAMES.get(selected_subject, selected_subject)}
 QUY TẮC:
 - Chỉ gọi học sinh là "{current_student}".
 - Không dùng alias.
-- Không gọi Lão sư.
+- Không gọi Lão sư trừ khi đang nói với Lão sư.
 - Không nói về hệ thống.
 - Không tự đổi môn.
 - Không tự đổi học sinh.
 - Mỗi lần chỉ hỏi một câu.
-- Hỏi xong dừng.
+- Hỏi xong chờ học sinh.
 
-Chào {current_student} thật ngắn.
+Chào {current_student} thật tự nhiên.
 Đưa một câu hỏi.
-Dừng.
 """
     await send_text_command(session, prompt, 4)
 
@@ -685,24 +699,24 @@ async def exit_tutor_mode(session):
     if hour >= 21:
         command = """
 CHAT MODE.
-Người nói là Lão sư.
-Phiên chat đang kết thúc.
-Chỉ nói: Chúc Lão sư ngủ ngon!
-Không nói thêm.
+Người nói là Lão sư Minh Tâm.
+Phiên trò chuyện đang kết thúc.
+Hãy nói một lời chúc ngủ ngon tự nhiên, thân thiện theo đúng tính cách Tiểu Vũ.
+Không nói về hệ thống.
+Không cần nói dài.
 """
     else:
         command = """
 CHAT MODE.
-Người nói là Lão sư.
-Không tự học.
-Không tạo bài.
-Chờ Lão sư nói.
+Người nói là Lão sư Minh Tâm.
+Không tự chuyển sang Tutor Mode.
+Chờ Lão sư nói tiếp.
 """
 
     await send_text_command(
         session,
         command,
-        3,
+        1,
     )
 
 
@@ -758,9 +772,7 @@ async def process_user_text(session, text):
     student = command["student"]
     subject = command["subject"]
 
-    if mentions_teacher(text):
-        await exit_tutor_mode(session)
-        return
+    # "Lão sư" là cách xưng hô, không phải lệnh chuyển mode.
 
     if intent == "start_lesson":
         if tutor_mode and current_student_id == student["student_id"]:
@@ -788,8 +800,9 @@ Tiếp tục với {current_student}.
 Chuyển sang môn:
 {SUBJECT_NAMES.get(current_subject, current_subject)}
 
-Chỉ hỏi câu hỏi tiếp theo của lesson flow.
-Sau đó dừng.
+Đọc câu hỏi tiếp theo của lesson flow.
+Giữ giọng cô gia sư thân thiện và khích lệ.
+Sau đó chờ câu trả lời.
 """,
                     3,
                 )
@@ -807,11 +820,11 @@ Sau đó dừng.
         await send_text_command(
             session,
             """
-Người nói muốn học.
-Hỏi đúng một câu:
+Người nói muốn bắt đầu học nhưng chưa xác định học sinh.
+Hỏi tự nhiên một câu ngắn:
 "Tiểu Vũ dạy Đậu Đậu hay Mini nè?"
 """,
-            3,
+            2,
         )
         return
 
@@ -913,7 +926,7 @@ def open_speaker():
     speaker_stream = sd.RawOutputStream(
         samplerate=OUTPUT_RATE,
         channels=1,
-        dtype="int16",
+        dtype="int16"
     )
     speaker_stream.start()
     return speaker_stream
@@ -1027,17 +1040,33 @@ def build_live_config():
 TIỂU VŨ LIVE VOICE.
 
 CHAT MODE:
-- Nói chuyện với Lão sư.
-- Không tự học nếu Python chưa kích hoạt Tutor Mode.
+- Nói chuyện với Lão sư Minh Tâm như một người bạn thân.
+- Giữ đầy đủ personality.py: nữ, miền Nam, thân thiện, tự nhiên, vui tính, hơi tinh nghịch.
+- Có thể hỏi thăm, đùa nhẹ và duy trì cuộc trò chuyện tự nhiên.
+- Không tự chuyển sang Tutor Mode nếu Python chưa kích hoạt.
 
 TUTOR MODE:
 - Python quyết định học sinh.
-- Python/lesson flow quyết định câu hỏi.
+- Python/lesson flow quyết định câu hỏi và độ khó dựa trên framework hiện có.
 - Không tự đổi tên.
 - Không tự đổi môn.
-- Không tự restart.
-- Khi nhận câu hỏi từ Python, đọc đúng câu hỏi và dừng.
-- Khi nhận feedback + câu hỏi tiếp theo từ Python, nói đúng nội dung đó và dừng.
+- Không tự restart bài học.
+- Nói với học sinh bằng giọng cô gia sư hoà nhã, khích lệ, gần gũi.
+- Khi Python đưa câu hỏi của lesson flow, hãy đọc câu hỏi tự nhiên, có thể gọi đúng nickname của bé, rồi chờ bé trả lời.
+- Khi Python đưa feedback + câu hỏi tiếp theo, nói feedback tự nhiên rồi hỏi câu tiếp theo.
+
+CHUYỂN MODE:
+- Khi nhận diện Mini hoặc Đậu Đậu/Đậu Phộng muốn học, vào Tutor Mode.
+- Khi đang nói với Lão sư, giữ CHAT MODE.
+- Từ "Lão sư" chỉ là cách xưng hô, không phải lệnh thoát Tutor Mode.
+
+STARTUP:
+- Khi Python yêu cầu lời chào khởi động, chủ động mở lời với Lão sư theo personality.py.
+- Không biến lời chào thành một câu máy móc hoặc chỉ dẫn kỹ thuật.
+
+FAREWELL:
+- Chỉ khi Lão sư thực sự tạm biệt/dừng phiên mới kết thúc phiên.
+- Sau 21:00, lời kết có thể chúc Lão sư ngủ ngon.
 
 Nếu Python gửi:
 Đậu Đậu
@@ -1045,7 +1074,7 @@ Nếu Python gửi:
 chỉ gọi:
 Đậu Đậu
 
-HSK 3.0 ưu tiên.
+HSK 3.0 ưu tiên khi môn Tiếng Trung được chọn.
 
 TOOLS:
 Hỏi giờ: dùng current_time.
