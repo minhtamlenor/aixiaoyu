@@ -7,13 +7,11 @@ Live API fixes. It never copies from the user's experimental local version.
 Fixes:
 1. Do not discard input transcription when Gemini marks a model response
    interrupted (barge-in).
-2. Explicitly enable automatic VAD with conservative speech-start and
-   speech-end settings.
+2. Explicitly enable automatic VAD with stable speech-start/end settings.
 3. Keep input/output audio transcription enabled.
-4. Use the existing Vietnam-time helper for startup/farewell decisions.
-
-Run from the repository root after `git pull origin main`:
-    python tools/repair_live_voice.py
+4. Add lightweight microphone/transcription diagnostics so the failing stage
+   can be identified without changing the audio format or framework.
+5. Use the existing Vietnam-time helper for startup/farewell decisions.
 """
 
 from __future__ import annotations
@@ -85,15 +83,30 @@ def main() -> None:
     )
 
     # --------------------------------------------------------
+    # Microphone diagnostics: preserve the existing PCM pipeline.
+    # --------------------------------------------------------
+    text = replace_once(
+        text,
+        '''    async def sender():\n        while not shutdown_requested:\n            data = await audio_queue.get()\n            try:\n                await session.send_realtime_input(\n                    audio=types.Blob(\n                        data=data,\n                        mime_type="audio/pcm;rate=16000",\n                    )\n                )\n            except Exception as e:\n''',
+        '''    async def sender():\n        sent_bytes = 0\n        last_report = loop.time()\n\n        while not shutdown_requested:\n            data = await audio_queue.get()\n            try:\n                await session.send_realtime_input(\n                    audio=types.Blob(\n                        data=data,\n                        mime_type="audio/pcm;rate=16000",\n                    )\n                )\n                sent_bytes += len(data)\n\n                now = loop.time()\n                if now - last_report >= 2.0:\n                    print(\n                        f"🎤 MIC → Gemini: {sent_bytes} bytes / 2s",\n                        flush=True,\n                    )\n                    sent_bytes = 0\n                    last_report = now\n            except Exception as e:\n''',
+        "microphone diagnostics",
+    )
+
+    text = replace_once(
+        text,
+        '''        if input_text:\n            await process_user_text(session, input_text)\n''',
+        '''        if input_text:\n            print("📝 INPUT TRANSCRIPT:", input_text, flush=True)\n            await process_user_text(session, input_text)\n''',
+        "input transcript diagnostic",
+    )
+
+    # --------------------------------------------------------
     # Explicit automatic VAD.
-    # This follows Google's Live API configuration instead of relying on
-    # implicit defaults. The values are intentionally modest so normal speech
-    # is detected without making the assistant trigger on tiny noise bursts.
+    # Use a normal speech window rather than ultra-short silence detection.
     # --------------------------------------------------------
     text = replace_once(
         text,
         '''        tools=[tools],\n        input_audio_transcription={},\n        output_audio_transcription={},\n    )\n''',
-        '''        tools=[tools],\n        input_audio_transcription={},\n        output_audio_transcription={},\n        realtime_input_config=types.RealtimeInputConfig(\n            automatic_activity_detection=types.AutomaticActivityDetection(\n                disabled=False,\n                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,\n                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,\n                prefix_padding_ms=20,\n                silence_duration_ms=100,\n            )\n        ),\n    )\n''',
+        '''        tools=[tools],\n        input_audio_transcription={},\n        output_audio_transcription={},\n        realtime_input_config=types.RealtimeInputConfig(\n            automatic_activity_detection=types.AutomaticActivityDetection(\n                disabled=False,\n                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,\n                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,\n                prefix_padding_ms=100,\n                silence_duration_ms=500,\n            )\n        ),\n    )\n''',
         "automatic VAD",
     )
 
@@ -107,8 +120,10 @@ def main() -> None:
     print("✅ Đã tạo lại live_voice.py từ origin/main.")
     print("✅ Giữ nguyên personality / Chat Mode / Tutor Mode / lesson flow.")
     print("✅ Đã sửa barge-in để không bỏ qua input của Lão sư.")
-    print("✅ Đã bật explicit automatic VAD theo Live API.")
-    print("✅ Đã giữ input/output audio transcription.")
+    print("✅ Đã bật automatic VAD: HIGH start / LOW end / 500ms silence.")
+    print("✅ Đã giữ nguyên PCM 16kHz mono và input/output transcription.")
+    print("✅ Đã thêm MIC → Gemini diagnostic, không đổi audio pipeline.")
+    print("✅ Đã thêm INPUT TRANSCRIPT diagnostic.")
     print("✅ Đã đồng bộ giờ Asia/Ho_Chi_Minh.")
     print("✅ Python syntax: OK")
 
