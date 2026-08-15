@@ -37,7 +37,9 @@ async def main() -> None:
     client = genai.Client(api_key=api_key)
 
     config = types.LiveConnectConfig(
-        response_modalities=["TEXT"],
+        # This Live model requires AUDIO response modality. We are still
+        # testing input transcription; no output audio is played by this tool.
+        response_modalities=["AUDIO"],
         input_audio_transcription={},
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
