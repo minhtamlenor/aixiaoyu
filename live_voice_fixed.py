@@ -3,15 +3,16 @@
 #
 # Giữ nguyên toàn bộ student / tutor / subject / tool logic
 # trong live_voice.py. File này chỉ thay lớp runtime audio
-# và cách gửi command để sửa 2 lỗi:
+# và cách xử lý transcript để sửa:
 #   1. Có transcription nhưng không phát âm thanh.
 #   2. Âm thanh giật/đứt khi chuyển sang Tutor Mode.
+#   3. Audio cũ tiếp tục phát sau khi Gemini báo interrupted.
+#   4. Một transcript bị xử lý lặp nhiều lần.
 # ============================================================
 
 import asyncio
 
 import sounddevice as sd
-from google.genai import types
 
 import live_voice as core
 
@@ -21,7 +22,9 @@ import live_voice as core
 # ============================================================
 
 _audio_stream = None
-_audio_lock = asyncio.Lock()
+_audio_queue = None
+_audio_task = None
+_audio_generation = 0
 
 
 def _start_audio():
@@ -59,11 +62,20 @@ def _close_audio():
         pass
 
 
-async def _play_audio(data):
-    if not data:
-        return
+async def _audio_writer():
+    """Play queued Gemini PCM chunks without blocking receive_loop."""
+    while True:
+        item = await _audio_queue.get()
 
-    async with _audio_lock:
+        if item is None:
+            return
+
+        generation, data = item
+
+        # Discard chunks belonging to a response that was interrupted.
+        if generation != _audio_generation:
+            continue
+
         try:
             _start_audio()
             await asyncio.to_thread(
@@ -78,13 +90,82 @@ async def _play_audio(data):
             _close_audio()
 
 
+async def _start_audio_runtime():
+    global _audio_queue
+    global _audio_task
+    global _audio_generation
+
+    _audio_generation = 0
+    _audio_queue = asyncio.Queue(maxsize=32)
+    _audio_task = asyncio.create_task(_audio_writer())
+
+
+def _clear_audio_queue():
+    global _audio_generation
+
+    # Increment generation first so a chunk already waiting in the queue
+    # can never be played after an interruption.
+    _audio_generation += 1
+
+    if _audio_queue is None:
+        return
+
+    while True:
+        try:
+            _audio_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+
+
+async def _stop_audio_runtime():
+    global _audio_task
+    global _audio_queue
+
+    _clear_audio_queue()
+
+    if _audio_task is not None:
+        try:
+            _audio_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+        try:
+            await _audio_task
+        except Exception:
+            pass
+
+    _audio_task = None
+    _audio_queue = None
+    _close_audio()
+
+
+async def _queue_audio(data):
+    if not data or _audio_queue is None:
+        return
+
+    item = (_audio_generation, data)
+
+    try:
+        _audio_queue.put_nowait(item)
+    except asyncio.QueueFull:
+        # Keep latency bounded. If output falls behind, discard the oldest
+        # queued chunk instead of allowing an audible growing delay.
+        try:
+            _audio_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+
+        try:
+            _audio_queue.put_nowait(item)
+        except asyncio.QueueFull:
+            pass
+
+
 # ============================================================
 # SEND TEXT COMMAND
 # ============================================================
-# Gemini 3.1 Flash Live không nên trộn send_client_content
-# với send_realtime_input sau khi phiên đã bắt đầu.
-# Command nội bộ trong lúc đang hội thoại phải đi bằng
-# send_realtime_input(text=...).
+# Gemini 3.1 Flash Live dùng send_realtime_input(text=...) cho
+# command nội bộ sau khi phiên đã bắt đầu.
 # ============================================================
 
 async def send_text_command(
@@ -156,6 +237,18 @@ async def receive_loop(session):
                 continue
 
             # --------------------------------------------------
+            # INTERRUPTION
+            # --------------------------------------------------
+            if getattr(server, "interrupted", False):
+                print(
+                    "🛑 Tiểu Vũ bị người nói ngắt lời.",
+                    flush=True,
+                )
+                # Google khuyến nghị dừng phát và xoá buffer ngay khi
+                # server báo interrupted.
+                _clear_audio_queue()
+
+            # --------------------------------------------------
             # USER TRANSCRIPTION
             # --------------------------------------------------
             input_transcription = getattr(
@@ -173,22 +266,27 @@ async def receive_loop(session):
             if input_text:
                 clean_text = input_text.strip()
 
-                # input_transcription có thể xuất hiện nhiều lần
-                # trong cùng một lượt. Chỉ xử lý một transcript duy nhất.
+                # input_transcription có thể xuất hiện nhiều lần trong
+                # cùng một lượt. Không xử lý lại cùng một transcript.
                 if clean_text and clean_text != input_text_seen:
                     input_text_seen = clean_text
 
-                    command = core.detect_tutor_command(
-                        clean_text
-                    )
+                    # Khi đang ở Tutor Mode và lesson đang chờ câu trả lời,
+                    # transcript của học sinh phải được chuyển vào lesson flow.
+                    # Các transcript chat bình thường để Gemini tự xử lý.
+                    command = core.detect_tutor_command(clean_text)
 
-                    # Chỉ đưa transcript vào Python controller khi
-                    # thực sự là command điều khiển Tutor/Student.
-                    # Chat bình thường để Gemini tự xử lý.
-                    if (
+                    should_process = (
                         command["intent"] != "chat"
                         or core.mentions_teacher(clean_text)
-                    ):
+                        or (
+                            core.tutor_mode
+                            and core.lesson_session
+                            and core.lesson_waiting_for_answer
+                        )
+                    )
+
+                    if should_process:
                         await core.process_user_text(
                             session,
                             clean_text,
@@ -244,7 +342,7 @@ async def receive_loop(session):
                     )
 
                     if data:
-                        await _play_audio(data)
+                        await _queue_audio(data)
 
             # --------------------------------------------------
             # TURN COMPLETE
@@ -278,19 +376,24 @@ async def receive_loop(session):
 async def run_one_connection():
     config = core.build_live_config()
 
-    async with core.client.aio.live.connect(
-        model=core.MODEL,
-        config=config,
-    ) as session:
-        print(
-            "✅ Gemini Live connected",
-            flush=True,
-        )
+    await _start_audio_runtime()
 
-        await asyncio.gather(
-            receive_loop(session),
-            core.microphone_sender(session),
-        )
+    try:
+        async with core.client.aio.live.connect(
+            model=core.MODEL,
+            config=config,
+        ) as session:
+            print(
+                "✅ Gemini Live connected",
+                flush=True,
+            )
+
+            await asyncio.gather(
+                receive_loop(session),
+                core.microphone_sender(session),
+            )
+    finally:
+        await _stop_audio_runtime()
 
 
 async def start_live_voice():
@@ -313,11 +416,12 @@ async def start_live_voice():
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 10)
     finally:
-        _close_audio()
+        await _stop_audio_runtime()
 
 
 def cleanup():
     core.shutdown_requested = True
+    _clear_audio_queue()
     _close_audio()
     print(
         "🧹 Tiểu Vũ đóng.",
