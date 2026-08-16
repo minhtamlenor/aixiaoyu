@@ -326,7 +326,7 @@ async def receive_loop(session,speaker=None):
 def build_live_config():
     tools=types.Tool(function_declarations=[
         types.FunctionDeclaration(name="current_time",description="Lấy giờ Việt Nam",parameters=types.Schema(type="OBJECT",properties={})),
-        types.FunctionDeclaration(name="calculator",description="Tính toán",parameters=types.Schema(type="OBJECT",properties={"expression":types.Schema(type="STRING")},required=["expression"])),
+        types.FunctionDeclaration(name="calculator",description="Tính toán",parameters=types.Schema(type="OBJECT",properties={"expression":types.Schema(type="OBJECT",properties={})},required=[])),
         types.FunctionDeclaration(name="current_calendar",description="Lấy lịch dương âm",parameters=types.Schema(type="OBJECT",properties={})),
     ])
     instruction=SYSTEM_INSTRUCTION+"""
@@ -338,7 +338,22 @@ STARTUP: Khi Python yêu cầu lời chào khởi động, chủ động mở l�
 FAREWELL: Chỉ khi Lão sư thực sự tạm biệt/dừng phiên mới kết thúc.
 TOOLS: Hỏi giờ dùng current_time. Tính dùng calculator. Ngày dùng current_calendar. Không đoán dữ liệu.
 """
-    return types.LiveConnectConfig(response_modalities=["AUDIO"],system_instruction=types.Content(parts=[types.Part(text=instruction)]),tools=[tools],input_audio_transcription={},output_audio_transcription={})
+    return types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        system_instruction=types.Content(parts=[types.Part(text=instruction)]),
+        tools=[tools],
+        input_audio_transcription={},
+        output_audio_transcription={},
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                disabled=False,
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                prefix_padding_ms=100,
+                silence_duration_ms=500,
+            )
+        ),
+    )
 
 async def run_one_connection():
     global speaker_generation
