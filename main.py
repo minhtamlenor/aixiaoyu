@@ -2,6 +2,7 @@
 # TIỂU VŨ - MAIN
 # ============================================================
 
+import datetime
 import voice
 
 from student_memory import (
@@ -274,23 +275,53 @@ async def _process_user_text_with_memory(session, text):
 # STARTUP GREETING GUARD
 # ------------------------------------------------------------
 # voice.py vẫn là voice baseline. Chỉ chặn đúng câu lệnh startup cũ
-# và thay bằng lời nhắc đầy đủ để Gemini nói:
+# và thay bằng lời chào thân thiện theo thời gian trong ngày:
 #   1. "Chào Lão sư!"
-#   2. hỏi thăm Lão sư
-#   3. giữ CHAT MODE và chờ Lão sư
+#   2. chào theo đúng mốc giờ hiện tại
+#   3. hỏi thăm Lão sư tự nhiên
+#   4. giữ CHAT MODE và chờ Lão sư
 # Không ảnh hưởng các lượt nói khác.
 _original_send_text = voice.send_text
 
 
+def _time_aware_startup_greeting():
+    """Tạo ngữ cảnh lời chào theo giờ máy lúc Tiểu Vũ được kích hoạt."""
+    hour = datetime.datetime.now().hour
+
+    if hour == 23:
+        return "Chào Lão sư! Khuya rồi, Lão sư vẫn còn thức làm việc à?"
+    if 0 <= hour <= 4:
+        return "Chào Lão sư! Giờ này khuya lắm rồi, Lão sư vẫn còn thức à?"
+    if 5 <= hour <= 11:
+        return "Chào Lão sư! Chào buổi sáng! Hôm nay Lão sư thấy thế nào ạ?"
+    if hour == 12:
+        return "Chào Lão sư! Chào buổi trưa! Lão sư dùng bữa và nghỉ ngơi chưa ạ?"
+    if 13 <= hour <= 17:
+        return "Chào Lão sư! Chào buổi chiều! Hôm nay công việc của Lão sư ổn chứ ạ?"
+    if 18 <= hour <= 22:
+        return "Chào Lão sư! Chào buổi tối! Hôm nay Lão sư có mệt không ạ?"
+
+    return "Chào Lão sư! Hôm nay Lão sư thấy thế nào ạ?"
+
+
 async def _send_text_with_startup_guard(session, text):
     if text.strip() == "Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới.":
-        text = (
-            "Tiểu Vũ vừa được kích hoạt và đang ở CHAT MODE với Lão sư Minh Tâm. "
-            "Câu đầu tiên BẮT BUỘC phải nói chính xác: Chào Lão sư! "
-            "Ngay sau đó hỏi thăm Lão sư một câu ngắn, tự nhiên và thân thiện, ví dụ hỏi Lão sư hôm nay khỏe không. "
-            "Không hỏi bài học, không gọi học sinh, không chuyển sang Tutor Mode. "
-            "Sau lời chào và hỏi thăm thì dừng lại, chờ Lão sư nói tiếp."
-        )
+        greeting = _time_aware_startup_greeting()
+        text = f"""
+Tiểu Vũ vừa được kích hoạt và đang ở CHAT MODE với Lão sư Minh Tâm.
+
+TÍNH CÁCH:
+- Thân thiện, vui vẻ, gần gũi, tự nhiên; không máy móc, không quá trang trọng.
+- Luôn nhớ Lão sư là người đang nói chuyện với Tiểu Vũ.
+
+LỜI CHÀO KÍCH HOẠT:
+- Câu đầu tiên BẮT BUỘC phải bắt đầu chính xác bằng: "Chào Lão sư!"
+- Sau đó dùng lời chào theo thời gian hiện tại: "{greeting}"
+- Có thể diễn đạt tự nhiên, vui vẻ, nhưng không được bỏ câu "Chào Lão sư!".
+- Sau lời chào, hỏi thăm Lão sư một câu ngắn phù hợp thời điểm trong ngày.
+- Không hỏi bài học, không gọi học sinh, không chuyển sang Tutor Mode.
+- Chỉ chào hỏi và hỏi thăm, sau đó DỪNG để chờ Lão sư nói tiếp.
+"""
     await _original_send_text(session, text)
 
 
