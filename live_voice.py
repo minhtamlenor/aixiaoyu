@@ -21,7 +21,7 @@ from tools.calculator import calculate
 from tools.calendar_tool import get_calendar_text
 from tutor.lesson_flow import start_lesson, next_lesson_question, answer_current_question, build_question_speech, build_answer_speech
 
-client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(api_version="v1beta"))
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 speaker_stream = None
 tutor_mode = False
@@ -230,9 +230,6 @@ async def microphone_sender(session):
     with sd.InputStream(device=MIC,samplerate=INPUT_RATE,channels=CHANNELS,dtype="int16",blocksize=BLOCKSIZE,callback=callback):
         print("🎤 Microphone sẵn sàng.",flush=True); await sender()
 
-# ============================================================
-# SPEAKER: queue audio so receive_loop never blocks on sounddevice.write
-# ============================================================
 speaker_generation=0
 speaker_queue=None
 speaker_task=None
@@ -272,14 +269,8 @@ async def speaker_writer():
 async def queue_speaker_audio(data):
     if not data or speaker_queue is None or shutdown_requested:return
     item=(speaker_generation,data)
-    # Không bỏ chunk âm thanh đang chờ. Việc drop chunk gây mất mẫu,
-    # tạo tiếng giật/đứt đúng lúc Gemini gửi audio theo burst.
-    # Khi Gemini báo interrupted, clear_speaker_queue() sẽ xoá toàn bộ
-    # thế hệ audio cũ trước khi audio mới được phát.
-    try:
-        await speaker_queue.put(item)
-    except asyncio.CancelledError:
-        return
+    try: await speaker_queue.put(item)
+    except asyncio.CancelledError:return
 
 async def receive_loop(session,speaker=None):
     global speaker_queue,speaker_task
@@ -321,7 +312,6 @@ async def receive_loop(session,speaker=None):
             try:await speaker_task
             except Exception:pass
         speaker_task=None; speaker_queue=None
-
 
 def build_live_config():
     tools=types.Tool(function_declarations=[
