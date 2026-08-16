@@ -10,3 +10,6 @@ __pycache__/
 .idea/
 
 config_secret.py
+
+# Xiaoyu persistent student preferences stay local and private.
+.xiaoyu_student_memory.json
