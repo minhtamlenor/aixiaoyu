@@ -270,19 +270,21 @@ async def speaker_writer():
         except Exception as e: print("⚠️ Speaker lỗi:",repr(e),flush=True); close_speaker()
 
 async def queue_speaker_audio(data):
-    if not data or speaker_queue is None:return
+    if not data or speaker_queue is None or shutdown_requested:return
     item=(speaker_generation,data)
-    try:speaker_queue.put_nowait(item)
-    except asyncio.QueueFull:
-        try:speaker_queue.get_nowait()
-        except asyncio.QueueEmpty:pass
-        try:speaker_queue.put_nowait(item)
-        except asyncio.QueueFull:pass
+    # Không bỏ chunk âm thanh đang chờ. Việc drop chunk gây mất mẫu,
+    # tạo tiếng giật/đứt đúng lúc Gemini gửi audio theo burst.
+    # Khi Gemini báo interrupted, clear_speaker_queue() sẽ xoá toàn bộ
+    # thế hệ audio cũ trước khi audio mới được phát.
+    try:
+        await speaker_queue.put(item)
+    except asyncio.CancelledError:
+        return
 
 async def receive_loop(session,speaker=None):
     global speaker_queue,speaker_task
     input_text_seen=""
-    speaker_queue=asyncio.Queue(maxsize=32)
+    speaker_queue=asyncio.Queue(maxsize=128)
     speaker_task=asyncio.create_task(speaker_writer())
     try:
         async for response in session.receive():
