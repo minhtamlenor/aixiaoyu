@@ -12,13 +12,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Patch live_voice.py
-        shell: python
         run: |
+          python - <<'PY'
           from pathlib import Path
 
           p = Path("live_voice.py")
           s = p.read_text(encoding="utf-8")
-
           start_marker = "# ============================================================\n# MICROPHONE: MANUAL VAD"
           end_marker = "# ============================================================\n# RECEIVE LOOP"
           start = s.find(start_marker)
@@ -77,11 +76,8 @@ async def microphone_sender(session):
         sent = 0
         while not shutdown_requested:
             data = await audio_queue.get()
-
-            # Do not feed the speaker output back into Gemini.
             if not listen_ready or model_speaking:
                 continue
-
             try:
                 await session.send_realtime_input(
                     audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
@@ -90,13 +86,11 @@ async def microphone_sender(session):
             except Exception as e:
                 print("⚠️ MIC gửi audio lỗi:", repr(e), flush=True)
                 continue
-
             if sent >= 32000:
                 print(f"🎤 MIC → Gemini: {sent} bytes", flush=True)
                 sent = 0
 
 '''
-
           s = s[:start] + microphone + s[end:]
 
           old = '''        # Automatic VAD is deliberately disabled. microphone_sender owns the
@@ -117,8 +111,8 @@ async def microphone_sender(session):
           if old not in s:
               raise SystemExit("Disabled VAD config not found; refusing to modify config")
           s = s.replace(old, new, 1)
-
           p.write_text(s, encoding="utf-8")
+          PY
 
       - name: Verify Python syntax
         run: python -m py_compile live_voice.py
