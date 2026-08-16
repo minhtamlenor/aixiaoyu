@@ -326,7 +326,7 @@ async def receive_loop(session,speaker=None):
 def build_live_config():
     tools=types.Tool(function_declarations=[
         types.FunctionDeclaration(name="current_time",description="Lấy giờ Việt Nam",parameters=types.Schema(type="OBJECT",properties={})),
-        types.FunctionDeclaration(name="calculator",description="Tính toán",parameters=types.Schema(type="OBJECT",properties={"expression":types.Schema(type="OBJECT",properties={})},required=[])),
+        types.FunctionDeclaration(name="calculator",description="Tính toán",parameters=types.Schema(type="OBJECT",properties={"expression":types.Schema(type="STRING")},required=["expression"])),
         types.FunctionDeclaration(name="current_calendar",description="Lấy lịch dương âm",parameters=types.Schema(type="OBJECT",properties={})),
     ])
     instruction=SYSTEM_INSTRUCTION+"""
