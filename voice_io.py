@@ -13,6 +13,7 @@ from collections import deque
 
 import sounddevice as sd
 from groq import Groq
+from google.genai import types
 
 import live_voice as brain
 
@@ -22,10 +23,9 @@ FRAME_MS = 30
 FRAME_BYTES = SAMPLE_RATE * FRAME_MS // 1000 * 2
 PREROLL_MS = 300
 # Cho phép khoảng ngắt tự nhiên dài hơn trước khi kết thúc một câu.
-# 1400 ms tránh việc câu nói dài bị chẻ chỉ vì dừng lại lấy hơi.
 END_SILENCE_MS = 1400
 MIN_SPEECH_MS = 180
-# 45 giây cho một lượt nói dài; không cắt ở 15 giây như bản trước.
+# Cho phép một lượt nói dài tới 45 giây, không cắt ở 15 giây như bản trước.
 MAX_UTTERANCE_MS = 45000
 VAD_RMS_THRESHOLD = 420
 STT_MODEL = "whisper-large-v3-turbo"
@@ -79,11 +79,8 @@ async def send_user_text_to_gemini(session, text):
     """Đưa transcript Groq vào Gemini Live như một user turn hoàn chỉnh.
 
     Groq là TAI duy nhất. Microphone không gửi PCM vào Gemini.
-
-    Với Gemini 3.1 Flash Live, transcript từ external STT được đưa vào
-    context bằng client content + turn_complete=True. Cách này xác định rõ
-    đây là một user turn và không phụ thuộc vào VAD/activity signal của
-    luồng microphone. Gemini Live vẫn trả AUDIO native 24 kHz như trước.
+    Transcript được gửi như client content với turn_complete=True để Gemini
+    tạo một model turn mới và trả AUDIO native như bình thường.
     """
     await session.send_client_content(
         turns=types.Content(
@@ -111,8 +108,8 @@ def _is_speech(frame: bytes) -> bool:
 async def microphone_loop(audio_queue):
     """Thu một utterance cục bộ để Groq Whisper xử lý.
 
-    Không gửi audio vào Gemini. Đây là điểm tách cứng giữa TAI và NÃO:
-    microphone -> local VAD -> WAV -> Groq Whisper -> text -> Gemini.
+    Microphone -> local VAD -> WAV -> Groq Whisper -> text -> Gemini.
+    Không gửi PCM microphone vào Gemini.
     """
     loop = asyncio.get_running_loop()
     preroll = deque(maxlen=max(1, PREROLL_MS // FRAME_MS))
@@ -164,7 +161,6 @@ async def microphone_loop(audio_queue):
         while not brain.shutdown_requested:
             frame = await audio_queue.get()
 
-            # Không thu lời của chính Tiểu Vũ.
             if brain.model_speaking:
                 preroll.clear()
                 speech.clear()
@@ -227,18 +223,14 @@ async def start_voice_io():
 
         async def audio_worker():
             async for utterance in microphone_loop(audio_queue):
-                # Chỉ một user turn được xử lý tại một thời điểm.
                 brain.listen_ready = False
 
                 text = await transcribe(utterance)
                 if not text:
-                    # Nếu Whisper không nhận được tiếng, cho phép nghe lại.
                     brain.listen_ready = True
                     continue
                 print("👤 Lão sư:", text, flush=True)
 
-                # process_user_text giữ nguyên toàn bộ command/tutor/lesson flow.
-                # Chỉ chat bình thường mới cần gửi text trực tiếp vào Gemini.
                 if brain.detect_farewell(text):
                     await brain.process_user_text(session, text)
                     continue
@@ -261,7 +253,6 @@ async def start_voice_io():
                     print("📨 TEXT → GEMINI: đã gửi transcript — chờ voice response", flush=True)
                 except Exception as exc:
                     print("⚠️ TEXT → GEMINI lỗi:", repr(exc), flush=True)
-                    # Không để một lỗi gửi text làm treo microphone vĩnh viễn.
                     brain.listen_ready = True
 
         receive_task = asyncio.create_task(brain.receive_loop(session))
