@@ -42,8 +42,6 @@ PREROLL_FRAMES = 5
 MIN_SPEECH_MS = 300
 MAX_SPEECH_MS = 30000
 
-# Whisper có thể hallucinate câu quảng cáo / YouTube khi audio gần như rỗng.
-# Các mẫu rõ ràng này bị chặn ngay ở lớp STT, tuyệt đối không đưa vào Gemini.
 WHISPER_GARBAGE_PATTERNS = [
     "hãy subscribe cho kênh",
     "subscribe cho kênh",
@@ -63,7 +61,6 @@ WHISPER_GARBAGE_PATTERNS = [
     "giữa lão sư và tiểu vũ",
 ]
 
-# Những tín hiệu này thường là prompt/hallucination của Whisper, không phải lời người dùng.
 WHISPER_GARBAGE_TOKENS = [
     "youtube",
     "quảng cáo",
@@ -216,7 +213,6 @@ def detect_tutor_command(text):
     learning = detect_learning_intent(text)
     if mentions_teacher(text):
         return {"intent": "chat", "student": None, "subject": None}
-    # Chỉ cần nhắc tên học sinh là chuyển tự nhiên sang Tutor Mode.
     if student:
         return {"intent": "start_lesson", "student": student, "subject": subject}
     if learning:
@@ -422,7 +418,7 @@ def trim_silence(pcm: bytes, threshold=120):
 
 
 def _stt_language():
-    """Chinese mode forces Mandarin; normal chat uses auto-detection so 'nihao' works."""
+    """Chinese mode forces Mandarin; normal chat uses auto-detection."""
     if current_subject == "chinese":
         return "zh"
     if current_mode == CHAT_MODE:
@@ -435,8 +431,6 @@ def _is_garbage_whisper(text: str) -> bool:
     for pattern in WHISPER_GARBAGE_PATTERNS:
         if remove_accents(pattern) in normalized:
             return True
-    # A very common hallucination signature: several unrelated media words in one
-    # short transcript. Do not suppress a normal single mention of YouTube.
     media_hits = sum(token in normalized for token in [
         "youtube", "quang cao", "subscribe", "dang ky kenh", "theo doi kenh", "video",
     ])
@@ -453,11 +447,51 @@ def clean_whisper_text(text: str) -> str:
     return text
 
 
-def transcribe(pcm: bytes) -> dict:
-    """Whisper tự nhận diện ngôn ngữ trong CHAT; Chinese Tutor ép zh để không đọc pinyin/Trung như Việt."""
-    language = _stt_language()
+def _has_chinese_characters(text: str) -> bool:
+    return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text or ""))
+
+
+def _is_likely_chinese_transcript(text: str) -> bool:
+    """Chỉ chấp nhận fallback zh khi Whisper thực sự trả về dấu hiệu tiếng Trung."""
+    text = (text or "").strip()
+    if not text:
+        return False
+    if _has_chinese_characters(text):
+        return True
+    normalized = remove_accents(text)
+    pinyin_tokens = {
+        "ni hao", "nǐ hǎo", "bu ke qi", "bú kè qi", "xie xie", "xiè xie",
+        "zai jian", "zàijiàn", "wo", "ni", "ta", "shi", "bu", "ke qi",
+        "zhong guo", "zhongwen", "zhong wen", "lao shi", "xue sheng",
+        "qing", "dui bu qi", "mei guan xi", "hao", "hen hao",
+    }
+    words = normalized.split()
+    return len(words) <= 8 and any(token in normalized for token in pinyin_tokens)
+
+
+def _whisper_quality(result, text: str) -> tuple[bool, str]:
+    """Kiểm tra confidence chung mà không thay đổi baseline Whisper."""
+    segments = getattr(result, "segments", None) or []
+    if not text:
+        return False, "empty"
+    if not segments:
+        return True, "ok"
+    try:
+        no_speech = max(float(getattr(seg, "no_speech_prob", 0.0) or 0.0) for seg in segments)
+        logprobs = [float(getattr(seg, "avg_logprob", 0.0) or 0.0) for seg in segments]
+        avg_logprob = sum(logprobs) / len(logprobs) if logprobs else 0.0
+        if no_speech >= 0.90:
+            return False, "silence"
+        if avg_logprob < -1.35:
+            return False, "unclear"
+    except (TypeError, ValueError):
+        pass
+    return True, "ok"
+
+
+def _create_whisper_result(language=None):
     kwargs = {
-        "file": ("xiaoyu.wav", pcm_to_wav(pcm)),
+        "file": ("xiaoyu.wav", None),
         "model": STT_MODEL,
         "response_format": "verbose_json",
         "temperature": 0.0,
@@ -470,28 +504,50 @@ def transcribe(pcm: bytes) -> dict:
     }
     if language:
         kwargs["language"] = language
+    return kwargs
 
-    result = groq.audio.transcriptions.create(**kwargs)
+
+def transcribe(pcm: bytes) -> dict:
+    """Whisper tự nhận diện trong chat; nếu câu ngắn/mơ hồ thì thử thêm Mandarin và chỉ nhận fallback khi có dấu hiệu tiếng Trung."""
+    language = _stt_language()
+    base_kwargs = _create_whisper_result(language)
+    base_kwargs["file"] = ("xiaoyu.wav", pcm_to_wav(pcm))
+
+    result = groq.audio.transcriptions.create(**base_kwargs)
     text = clean_whisper_text(getattr(result, "text", "") or "")
+    quality_ok, quality_reason = _whisper_quality(result, text)
 
-    segments = getattr(result, "segments", None) or []
-    if segments:
+    # CHAT MODE phải nghe được cả tiếng Việt lẫn tiếng Trung. Nếu auto-detect
+    # trả rỗng, quá ngắn hoặc có vẻ là pinyin/Latin, thử một lượt zh.
+    # Chỉ nhận kết quả zh nếu nó thực sự có dấu hiệu Mandarin; tránh hallucination
+    # tiếng Trung khi microphone chỉ có tiếng nền/im lặng.
+    should_try_zh = (
+        language is None
+        and (
+            not text
+            or not quality_ok
+            or len(text) <= 12
+            or not _has_chinese_characters(text)
+        )
+    )
+
+    if should_try_zh:
         try:
-            no_speech = max(float(getattr(seg, "no_speech_prob", 0.0) or 0.0) for seg in segments)
-            logprobs = [float(getattr(seg, "avg_logprob", 0.0) or 0.0) for seg in segments]
-            avg_logprob = sum(logprobs) / len(logprobs) if logprobs else 0.0
-            if no_speech >= 0.82 and not text:
-                return {"text": "", "reason": "silence"}
-            if text and no_speech >= 0.90:
-                return {"text": "", "reason": "silence"}
-            if text and avg_logprob < -1.35:
-                return {"text": "", "reason": "unclear"}
-        except (TypeError, ValueError):
-            pass
+            zh_kwargs = _create_whisper_result("zh")
+            zh_kwargs["file"] = ("xiaoyu.wav", pcm_to_wav(pcm))
+            zh_result = groq.audio.transcriptions.create(**zh_kwargs)
+            zh_text = clean_whisper_text(getattr(zh_result, "text", "") or "")
+            zh_ok, zh_reason = _whisper_quality(zh_result, zh_text)
+            if zh_ok and _is_likely_chinese_transcript(zh_text):
+                return {"text": zh_text, "reason": "ok", "language": "zh", "fallback": True}
+        except Exception as exc:
+            print("⚠️ Whisper zh fallback lỗi:", repr(exc), flush=True)
 
+    if not quality_ok:
+        return {"text": "", "reason": quality_reason, "language": language or "auto"}
     if not text:
-        return {"text": "", "reason": "empty"}
-    return {"text": text, "reason": "ok"}
+        return {"text": "", "reason": "empty", "language": language or "auto"}
+    return {"text": text, "reason": "ok", "language": language or "auto", "fallback": False}
 
 
 async def send_text(session, text):
@@ -499,7 +555,6 @@ async def send_text(session, text):
 
 
 async def ask_to_repeat(session):
-    """Chỉ dùng khi có dấu hiệu là lời nói thật nhưng Whisper không đủ rõ."""
     await send_text(
         session,
         "Tiểu Vũ nghe nè, Lão sư nói lại giúp Tiểu Vũ nha.",
@@ -620,7 +675,9 @@ async def microphone_loop(session):
                 listen_enabled = True
                 continue
 
-            print("📝 Groq Whisper:", text, flush=True)
+            lang = result.get("language", "auto")
+            suffix = " [zh fallback]" if result.get("fallback") else ""
+            print(f"📝 Groq Whisper ({lang}){suffix}:", text, flush=True)
             await process_user_text(session, text)
 
 
@@ -723,7 +780,7 @@ QUY TẮC LỚP TAI / WHISPER:
 - Tuyệt đối không tự sinh câu quảng cáo, YouTube, subscribe, giới thiệu video hoặc câu mẫu khi người dùng im lặng.
 - Nếu chỉ có tiếng nền hoặc Whisper không chắc đó là lời nói, bỏ qua và tiếp tục nghe.
 - Nếu có dấu hiệu người thật đang nói nhưng transcript quá mơ hồ, hãy nói ngắn: "Tiểu Vũ nghe nè, Lão sư nói lại giúp Tiểu Vũ nha." rồi chờ lại.
-- Khi CHAT MODE có thể nói tiếng Việt hoặc tiếng Trung, Whisper được phép tự nhận diện ngôn ngữ.
+- Khi CHAT MODE có thể nói tiếng Việt hoặc tiếng Trung, Whisper được phép tự nhận diện ngôn ngữ và có một lượt fallback Mandarin khi câu ngắn/mơ hồ.
 - Khi TUTOR MODE / CHINESE CONVERSATION MODE đang ở môn tiếng Trung, Whisper ưu tiên Mandarin (zh) để không biến tiếng Trung thành tiếng Việt.
 """
 
