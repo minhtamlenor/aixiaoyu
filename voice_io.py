@@ -74,14 +74,13 @@ async def transcribe(audio: bytes) -> str:
 
 
 async def send_user_text_to_gemini(session, text):
-    """Đưa transcript Groq vào Gemini Live như một user turn hoàn chỉnh."""
-    await session.send_client_content(
-        turns=types.Content(
-            role="user",
-            parts=[types.Part(text=text)],
-        ),
-        turn_complete=True,
-    )
+    """Đưa transcript Groq vào Gemini Live như input text của lượt chat hiện tại.
+
+    Không dùng send_client_content ở đây: sau lượt model đầu tiên, Live API
+    dùng send_realtime_input(text=...) cho text input tương tác. Đây là đúng
+    đường dữ liệu: MIC -> Groq Whisper -> transcript -> Gemini -> native AUDIO.
+    """
+    await session.send_realtime_input(text=text)
 
 
 def _is_speech(frame: bytes) -> bool:
