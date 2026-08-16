@@ -220,6 +220,37 @@ def get_level_instruction(grade):
         return "HỌC SINH LỚP 4.\nTOÁN: nhân, chia, chia có dư, bài toán lời văn, phân số, chu vi, diện tích, logic.\nTIẾNG TRUNG: HSK 3.0, từ vựng, nghe hiểu, phản xạ, hội thoại."
     return "HỌC SINH LỚP 6.\nTOÁN: số nguyên, phân số, biểu thức, hình học, logic.\nTIẾNG TRUNG: HSK 3.0, tăng vốn từ, nghe hiểu, hội thoại, đọc hiểu."
 
+
+# ============================================================
+# LANGUAGE ROUTING / CHINESE PRONUNCIATION
+# ============================================================
+CHINESE_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+PINYIN_HINT_RE = re.compile(r"\b(?:[a-zü]+[1-5]?)(?:\s+[a-zü]+[1-5]?)+\b", re.IGNORECASE)
+
+
+def contains_chinese(text):
+    return bool(text and CHINESE_CHAR_RE.search(text))
+
+
+def build_language_routing_instruction(subject_id, content=""):
+    """Tell Gemini how to route Vietnamese and Mandarin inside one AUDIO turn.
+
+    This deliberately does not create a second TTS engine or change the Live
+    voice baseline. Chinese characters are the source text for Mandarin;
+    Pinyin is only a pronunciation guide when it is present.
+    """
+    if subject_id == "chinese" or contains_chinese(content):
+        return """LANGUAGE ROUTING = MANDARIN.
+Đây là nội dung tiếng Trung. Hãy đọc chữ Hán trực tiếp bằng Mandarin/Putonghua (普通话) chuẩn.
+Không dùng cách phát âm tiếng Việt cho chữ Hán. Không đọc Pinyin như tiếng Việt và không đọc từng chữ cái Latin.
+Nếu có Pinyin (ví dụ: bú kèqi / bu keqi), Pinyin chỉ là GỢI Ý PHÁT ÂM; hãy chuyển nó thành cách phát âm Quan thoại tự nhiên, đúng thanh điệu.
+Nếu một lượt nói có cả tiếng Việt và tiếng Trung: phần tiếng Việt đọc tiếng Việt; phần chữ Hán/Pinyin tiếng Trung đọc Mandarin.
+Ví dụ: 不客气 → bú kèqi, 你好 → nǐ hǎo. Ưu tiên chữ Hán nguyên bản khi có cả chữ Hán và Pinyin."""
+    if subject_id is not None:
+        return "LANGUAGE ROUTING = VIETNAMESE. Nội dung tiếng Việt đọc bằng giọng tiếng Việt tự nhiên. Chỉ chuyển sang Mandarin khi nội dung thực sự là tiếng Trung."
+    return "LANGUAGE ROUTING: xác định ngôn ngữ theo từng đoạn. Chữ Hán/Pinyin tiếng Trung → Mandarin; tiếng Việt → tiếng Việt."
+
+
 # ============================================================
 # GEMINI COMMANDS / TUTOR
 # ============================================================
@@ -273,9 +304,10 @@ async def process_lesson_answer(session, text):
         next_question = next_lesson_question(lesson_session)
         lesson_waiting_for_answer = True
         next_speech = build_question_speech(lesson_session, next_question)
+        language_route = build_language_routing_instruction(current_subject, f"{feedback}\n{next_speech}")
         await send_text_command(
             session,
-            f"""Đây là kết quả từ lesson flow:\n{feedback}\n\nSau đó hỏi ngay câu tiếp theo:\n{next_speech}\n\nGiữ giọng cô gia sư thân thiện, khích lệ. Không nói về hệ thống. Không đổi học sinh hoặc môn.""",
+            f"""Đây là kết quả từ lesson flow:\n{feedback}\n\nSau đó hỏi ngay câu tiếp theo:\n{next_speech}\n\n{language_route}\n\nGiữ giọng cô gia sư thân thiện, khích lệ. Không nói về hệ thống. Không đổi học sinh hoặc môn.""",
             2,
         )
         return True
@@ -302,18 +334,19 @@ async def start_tutor_session(session, student, subject=None):
     print(); print("🎓 BẮT ĐẦU HỌC", flush=True); print("👤", current_student, flush=True); print("📚", SUBJECT_NAMES[selected_subject], flush=True)
     try:
         question_speech = await start_voice_lesson(student, selected_subject)
-        chinese_pronunciation = "\nKHI MÔN LÀ TIẾNG TRUNG: đọc toàn bộ tiếng Trung bằng Mandarin/Putonghua (普通话) chuẩn, phát âm rõ từng âm tiết và thanh điệu; không đọc Hán ngữ theo cách phát âm tiếng Việt."
+        language_route = build_language_routing_instruction(selected_subject, question_speech)
         await send_text_command(
             session,
-            f"""TUTOR MODE.\nPython đã xác định học sinh: {current_student}\nMôn hiện tại: {SUBJECT_NAMES[selected_subject]}\nLesson flow đã tạo câu hỏi đầu tiên:\n{question_speech}\n{chinese_pronunciation}\nHãy chào {current_student} thật tự nhiên, sau đó đọc đúng câu hỏi trên. Không tự đổi học sinh, không tự đổi môn, không thêm câu hỏi ngoài lesson flow. Sau khi hỏi xong, chờ học sinh trả lời.""",
+            f"""TUTOR MODE.\nPython đã xác định học sinh: {current_student}\nMôn hiện tại: {SUBJECT_NAMES[selected_subject]}\nLesson flow đã tạo câu hỏi đầu tiên:\n{question_speech}\n\n{language_route}\n\nHãy chào {current_student} thật tự nhiên, sau đó đọc đúng câu hỏi trên. Không tự đổi học sinh, không tự đổi môn, không thêm câu hỏi ngoài lesson flow. Sau khi hỏi xong, chờ học sinh trả lời.""",
             3,
         )
         return
     except Exception as e:
         print("⚠️ Không khởi động được lesson flow:", repr(e), flush=True)
+    language_route = build_language_routing_instruction(selected_subject)
     await send_text_command(
         session,
-        f"""TUTOR MODE.\nHọc sinh: {current_student}\nLớp: {grade}\nMôn: {SUBJECT_NAMES[selected_subject]}\n{get_level_instruction(grade)}\nChỉ gọi học sinh là {current_student}. Không tự đổi môn hoặc học sinh. Mỗi lần chỉ hỏi một câu. Chào học sinh và đưa một câu hỏi. Khi môn là Tiếng Trung, luôn phát âm bằng Mandarin/Putonghua (普通话) chuẩn, đúng âm tiết và thanh điệu, không đọc theo phát âm tiếng Việt.""",
+        f"""TUTOR MODE.\nHọc sinh: {current_student}\nLớp: {grade}\nMôn: {SUBJECT_NAMES[selected_subject]}\n{get_level_instruction(grade)}\n{language_route}\nChỉ gọi học sinh là {current_student}. Không tự đổi môn hoặc học sinh. Mỗi lần chỉ hỏi một câu. Chào học sinh và đưa một câu hỏi.""",
         3,
     )
 
@@ -357,7 +390,8 @@ async def process_user_text(session, text):
         if tutor_mode and current_student_id == student["student_id"]:
             if subject:
                 current_subject = choose_subject(subject)
-                await send_text_command(session, f"Tiếp tục với {current_student}. Chuyển sang môn {SUBJECT_NAMES[current_subject]}. Đọc câu hỏi tiếp theo của lesson flow rồi chờ câu trả lời.", 2)
+                language_route = build_language_routing_instruction(current_subject)
+                await send_text_command(session, f"Tiếp tục với {current_student}. Chuyển sang môn {SUBJECT_NAMES[current_subject]}. {language_route} Đọc câu hỏi tiếp theo của lesson flow rồi chờ câu trả lời.", 2)
             return
         await start_tutor_session(session, student, subject)
         return
@@ -747,7 +781,8 @@ CHAT MODE: Nói chuyện với Lão sư Minh Tâm như một người bạn thâ
 TUTOR MODE: Python quyết định học sinh. Python/lesson flow quyết định câu hỏi và độ khó. Không tự đổi tên, không tự đổi môn, không tự restart bài học. Nói với học sinh bằng giọng cô gia sư hoà nhã, khích lệ.
 CHUYỂN MODE: Khi nhận diện Mini hoặc Đậu Đậu/Đậu Phộng muốn học, vào Tutor Mode. Khi đang nói với Lão sư, giữ CHAT MODE.
 STARTUP: Khi Python yêu cầu lời chào khởi động, câu đầu tiên bắt buộc phải là "Chào Lão sư!" hoặc một câu chào tương đương có đúng ý "Chào Lão sư!". Sau câu chào mới được hỏi thăm Lão sư. Không đảo thứ tự.
-TIẾNG TRUNG: Khi nói hoặc đọc tiếng Trung, luôn dùng Mandarin/Putonghua (普通话) chuẩn. Phát âm rõ âm tiết và thanh điệu, đặc biệt khi đọc câu hỏi, từ vựng hoặc nội dung HSK. Không đọc Hán ngữ theo cách phát âm tiếng Việt. Khi nội dung đang là tiếng Trung thì ưu tiên phát âm tiếng Quan thoại chuẩn.
+LANGUAGE ROUTING: Không chọn ngôn ngữ chỉ dựa trên ngôn ngữ chung của cả lượt nói. Hãy phân đoạn nội dung theo script/ngữ cảnh. Tiếng Việt → giọng Việt; chữ Hán tiếng Trung hoặc Pinyin tiếng Trung → Mandarin/Putonghua (普通话).
+TIẾNG TRUNG: Khi đọc chữ Hán, đọc trực tiếp bằng Mandarin chuẩn, đúng âm tiết và thanh điệu. Không dùng cách phát âm tiếng Việt. Pinyin chỉ là gợi ý phát âm, không được đọc như tiếng Việt hoặc đọc từng chữ cái Latin. Với câu trộn Việt-Trung, chỉ đoạn tiếng Trung chuyển sang Mandarin; phần Việt vẫn đọc tiếng Việt.
 TOOLS: Hỏi giờ dùng current_time. Tính dùng calculator. Ngày dùng current_calendar. Không đoán dữ liệu.
 """
 
