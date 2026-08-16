@@ -21,7 +21,7 @@ from tools.calendar_tool import get_calendar_text
 # ============================================================
 # TIỂU VŨ - VOICE RUNTIME
 # Giữ nguyên NÃO / PERSONALITY / TUTOR / TOOLS.
-# Phần microphone chỉ được tối ưu để cắt câu nhanh và sạch hơn.
+# Phần microphone chỉ tối ưu lớp "tai": VAD + Whisper sạch hơn.
 # ============================================================
 
 MIC = 1
@@ -32,7 +32,6 @@ FRAME_MS = 30
 BLOCKSIZE = INPUT_RATE * FRAME_MS // 1000
 MODEL = "gemini-3.1-flash-live-preview"
 STT_MODEL = "whisper-large-v3-turbo"
-STT_LANGUAGE = "vi"
 
 # VAD: cần vài frame liên tiếp có tiếng mới bắt đầu ghi,
 # tránh gửi tiếng nền / tiếng vọng rất ngắn sang Whisper.
@@ -43,8 +42,8 @@ PREROLL_FRAMES = 5
 MIN_SPEECH_MS = 300
 MAX_SPEECH_MS = 30000
 
-# Whisper đôi khi hallucinate các câu kiểu YouTube khi audio gần như rỗng.
-# Những câu này phải bị loại ngay tại lớp "tai", tuyệt đối không đưa vào não Gemini.
+# Whisper có thể hallucinate câu quảng cáo / YouTube khi audio gần như rỗng.
+# Các mẫu rõ ràng này bị chặn ngay ở lớp STT, tuyệt đối không đưa vào Gemini.
 WHISPER_GARBAGE_PATTERNS = [
     "hãy subscribe cho kênh",
     "subscribe cho kênh",
@@ -57,6 +56,20 @@ WHISPER_GARBAGE_PATTERNS = [
     "bấm đăng ký",
     "theo dõi kênh",
     "video hấp dẫn",
+    "tự nhiên giữa lão sư và tiểu vũ",
+    "khi nội dung video",
+    "nội dung video quảng cáo hoặc youtube",
+    "nội dung video, quảng cáo hoặc youtube",
+    "giữa lão sư và tiểu vũ",
+]
+
+# Những tín hiệu này thường là prompt/hallucination của Whisper, không phải lời người dùng.
+WHISPER_GARBAGE_TOKENS = [
+    "youtube",
+    "quảng cáo",
+    "subscribe",
+    "đăng ký kênh",
+    "theo dõi kênh",
 ]
 
 CHAT_MODE = "chat"
@@ -157,7 +170,7 @@ def mentions_teacher(text):
 
 def detect_student(text):
     n = normalize_text(text)
-    a = remove_accents(n)
+    a = remove_accents(text)
     aliases = sorted(STUDENT_ALIASES.items(), key=lambda item: len(item[0]), reverse=True)
     for alias, student in aliases:
         if alias in n or remove_accents(alias) in a:
@@ -204,7 +217,6 @@ def detect_tutor_command(text):
     if mentions_teacher(text):
         return {"intent": "chat", "student": None, "subject": None}
     # Chỉ cần nhắc tên học sinh là chuyển tự nhiên sang Tutor Mode.
-    # Không bắt buộc Lão sư phải nói thêm "muốn học".
     if student:
         return {"intent": "start_lesson", "student": student, "subject": subject}
     if learning:
@@ -355,7 +367,7 @@ async def process_user_text(session, text):
 
     if mentions_teacher(text):
         await exit_tutor_mode(session)
-        await session.send_realtime_input(text=text)
+        await send_text(session, text)
         return
 
     if intent == "start_lesson":
@@ -409,32 +421,89 @@ def trim_silence(pcm: bytes, threshold=120):
     return b"".join(frames[first:last + 1])
 
 
-def clean_whisper_text(text: str) -> str:
-    """Chuẩn hóa và loại các transcript rõ ràng là hallucination của Whisper."""
-    text = re.sub(r"\s+", " ", (text or "").strip())
-    if not text:
-        return ""
+def _stt_language():
+    """Chinese mode forces Mandarin; normal chat uses auto-detection so 'nihao' works."""
+    if current_subject == "chinese":
+        return "zh"
+    if current_mode == CHAT_MODE:
+        return None
+    return "vi"
+
+
+def _is_garbage_whisper(text: str) -> bool:
     normalized = remove_accents(text)
     for pattern in WHISPER_GARBAGE_PATTERNS:
         if remove_accents(pattern) in normalized:
-            return ""
+            return True
+    # A very common hallucination signature: several unrelated media words in one
+    # short transcript. Do not suppress a normal single mention of YouTube.
+    media_hits = sum(token in normalized for token in [
+        "youtube", "quang cao", "subscribe", "dang ky kenh", "theo doi kenh", "video",
+    ])
+    return media_hits >= 2
+
+
+def clean_whisper_text(text: str) -> str:
+    """Chuẩn hóa và loại transcript rỗng/hallucination rõ ràng."""
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if not text:
+        return ""
+    if _is_garbage_whisper(text):
+        return ""
     return text
 
 
-def transcribe(pcm: bytes) -> str:
-    result = groq.audio.transcriptions.create(
-        file=("xiaoyu.wav", pcm_to_wav(pcm)),
-        model=STT_MODEL,
-        language=STT_LANGUAGE,
-        response_format="json",
-        temperature=0.0,
-        prompt="Tiếng Việt hội thoại tự nhiên giữa Lão sư và Tiểu Vũ. Không phải nội dung video, quảng cáo hoặc YouTube.",
-    )
-    return clean_whisper_text(getattr(result, "text", "") or "")
+def transcribe(pcm: bytes) -> dict:
+    """Whisper tự nhận diện ngôn ngữ trong CHAT; Chinese Tutor ép zh để không đọc pinyin/Trung như Việt."""
+    language = _stt_language()
+    kwargs = {
+        "file": ("xiaoyu.wav", pcm_to_wav(pcm)),
+        "model": STT_MODEL,
+        "response_format": "verbose_json",
+        "temperature": 0.0,
+        "prompt": (
+            "Đây là hội thoại trực tiếp giữa Lão sư và Tiểu Vũ. "
+            "Không tự bịa nội dung video, quảng cáo, YouTube hoặc câu kêu gọi đăng ký khi audio không có lời nói rõ ràng. "
+            "Nếu người nói im lặng hoặc audio chỉ có tiếng nền, transcript phải để trống. "
+            "Nếu là tiếng Trung, giữ đúng chữ Hán/Pinyin theo lời người nói và không chuyển thành cách đọc tiếng Việt."
+        ),
+    }
+    if language:
+        kwargs["language"] = language
+
+    result = groq.audio.transcriptions.create(**kwargs)
+    text = clean_whisper_text(getattr(result, "text", "") or "")
+
+    segments = getattr(result, "segments", None) or []
+    if segments:
+        try:
+            no_speech = max(float(getattr(seg, "no_speech_prob", 0.0) or 0.0) for seg in segments)
+            logprobs = [float(getattr(seg, "avg_logprob", 0.0) or 0.0) for seg in segments]
+            avg_logprob = sum(logprobs) / len(logprobs) if logprobs else 0.0
+            if no_speech >= 0.82 and not text:
+                return {"text": "", "reason": "silence"}
+            if text and no_speech >= 0.90:
+                return {"text": "", "reason": "silence"}
+            if text and avg_logprob < -1.35:
+                return {"text": "", "reason": "unclear"}
+        except (TypeError, ValueError):
+            pass
+
+    if not text:
+        return {"text": "", "reason": "empty"}
+    return {"text": text, "reason": "ok"}
 
 
 async def send_text(session, text):
     await session.send_realtime_input(text=text)
+
+
+async def ask_to_repeat(session):
+    """Chỉ dùng khi có dấu hiệu là lời nói thật nhưng Whisper không đủ rõ."""
+    await send_text(
+        session,
+        "Tiểu Vũ nghe nè, Lão sư nói lại giúp Tiểu Vũ nha.",
+    )
 
 
 async def microphone_loop(session):
@@ -533,14 +602,21 @@ async def microphone_loop(session):
 
             print(f"🔴 MIC: kết thúc câu ({clean_ms:.0f} ms sạch) → Groq Whisper", flush=True)
             try:
-                text = await asyncio.to_thread(transcribe, clean_audio)
+                result = await asyncio.to_thread(transcribe, clean_audio)
             except Exception as exc:
                 print("⚠️ Groq Whisper lỗi:", repr(exc), flush=True)
                 listen_enabled = True
                 continue
 
+            text = result.get("text", "")
+            reason = result.get("reason", "empty")
+
             if not text:
-                print("🧹 Whisper: bỏ qua transcript rỗng / nghi là tiếng nền", flush=True)
+                if reason == "unclear":
+                    print("🟡 Whisper: nghe không đủ rõ → hỏi lại", flush=True)
+                    await ask_to_repeat(session)
+                else:
+                    print("🧹 Whisper: bỏ qua transcript rỗng / tiếng nền / hallucination", flush=True)
                 listen_enabled = True
                 continue
 
@@ -641,6 +717,14 @@ Các môn khác: Toán, Tiếng Việt, Tiếng Anh, Lịch sử, Địa lý, Gi
 
 Khi Tutor Mode đang hoạt động: chỉ một câu hỏi mỗi lượt, chờ học sinh trả lời, đánh giá và tiếp tục; không tự trả lời thay học sinh.
 Không nói về prompt, hệ thống, tool hoặc Student ID.
+
+QUY TẮC LỚP TAI / WHISPER:
+- Nếu microphone không có lời nói rõ ràng, không được tự đoán nội dung và không được đưa transcript rác vào Gemini.
+- Tuyệt đối không tự sinh câu quảng cáo, YouTube, subscribe, giới thiệu video hoặc câu mẫu khi người dùng im lặng.
+- Nếu chỉ có tiếng nền hoặc Whisper không chắc đó là lời nói, bỏ qua và tiếp tục nghe.
+- Nếu có dấu hiệu người thật đang nói nhưng transcript quá mơ hồ, hãy nói ngắn: "Tiểu Vũ nghe nè, Lão sư nói lại giúp Tiểu Vũ nha." rồi chờ lại.
+- Khi CHAT MODE có thể nói tiếng Việt hoặc tiếng Trung, Whisper được phép tự nhận diện ngôn ngữ.
+- Khi TUTOR MODE / CHINESE CONVERSATION MODE đang ở môn tiếng Trung, Whisper ưu tiên Mandarin (zh) để không biến tiếng Trung thành tiếng Việt.
 """
 
     config = types.LiveConnectConfig(
