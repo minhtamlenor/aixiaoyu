@@ -203,10 +203,10 @@ def detect_tutor_command(text):
     learning = detect_learning_intent(text)
     if mentions_teacher(text):
         return {"intent": "chat", "student": None, "subject": None}
-    if student and learning:
-        return {"intent": "start_lesson", "student": student, "subject": subject}
+    # Chỉ cần nhắc tên học sinh là chuyển tự nhiên sang Tutor Mode.
+    # Không bắt buộc Lão sư phải nói thêm "muốn học".
     if student:
-        return {"intent": "switch_student", "student": student, "subject": subject}
+        return {"intent": "start_lesson", "student": student, "subject": subject}
     if learning:
         return {"intent": "unknown_student", "student": None, "subject": subject}
     return {"intent": "chat", "student": None, "subject": None}
@@ -362,19 +362,6 @@ async def process_user_text(session, text):
         await start_tutor_session(session, student, subject, switching=(current_mode == TUTOR_MODE))
         return
 
-    if intent == "switch_student":
-        if current_mode == TUTOR_MODE and student["student_id"] == current_student_id:
-            if subject:
-                current_subject = subject
-                await session.send_realtime_input(text=f"Tiếp tục với {current_student}. Chuyển sang môn {SUBJECT_NAMES.get(subject, subject)}. Hãy đưa một câu hỏi mới phù hợp lớp {current_grade}, chỉ hỏi một câu rồi dừng.")
-            else:
-                next_subject = get_next_subject()
-                current_subject = next_subject
-                await session.send_realtime_input(text=f"Tiếp tục với {current_student}. Chuyển sang môn {SUBJECT_NAMES[next_subject]}. Chỉ đưa một câu hỏi rồi dừng.")
-            return
-        await start_tutor_session(session, student, subject, switching=(current_mode == TUTOR_MODE))
-        return
-
     if intent == "unknown_student":
         await session.send_realtime_input(text="Người nói muốn bắt đầu học nhưng chưa nói tên học sinh. Hãy hỏi thật ngắn: Tiểu Vũ dạy Mini hay Minh Tiên nè? Chỉ hỏi một câu.")
         return
@@ -496,7 +483,6 @@ async def microphone_loop(session):
             if len(preroll) > PREROLL_FRAMES:
                 preroll.pop(0)
 
-            # Không bắt đầu chỉ vì một frame nhiễu. Cần một cụm frame liên tiếp vượt ngưỡng.
             if rms(frame) < VAD_THRESHOLD:
                 continue
 
