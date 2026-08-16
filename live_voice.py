@@ -590,7 +590,6 @@ async def microphone_sender(session):
                     speech_active = True
                     speech_ms = chunk_ms
                     silence_ms = 0
-                    listen_ready = False
                     print("🟢 VAD: speech START", flush=True)
                     try:
                         await session.send_realtime_input(activity_start=types.ActivityStart())
