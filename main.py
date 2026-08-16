@@ -98,6 +98,44 @@ Không random chủ đề vô hạn. Dạy theo roadmap, dựa vào kết quả 
 
 
 async def _start_tutor_session_with_memory(session, student, subject=None, switching=False):
+    # Khi chỉ nhắc tên bé mà chưa nói môn, vẫn chuyển sang Tutor Mode
+    # nhưng TUYỆT ĐỐI không mặc định sang Tiếng Trung. Hỏi bé muốn học môn nào.
+    if subject is None:
+        voice.current_mode = voice.TUTOR_MODE
+        voice.current_student = student["called_name"]
+        voice.current_student_id = student["student_id"]
+        voice.current_subject = None
+        voice.current_grade = student["grade"]
+
+        memory_instruction = build_memory_instruction(
+            student["student_id"],
+            student["official_name"],
+        )
+        subject_prompt = f"""
+TUTOR MODE ĐÃ BẬT CHO {student['called_name']}.
+
+Học sinh: {student['called_name']}
+Tên chính thức: {student['official_name']}
+Lớp: {student['grade']}
+
+QUAN TRỌNG:
+- Chưa có môn học được chọn.
+- KHÔNG được tự mặc định Tiếng Trung, dù Tiếng Trung là môn ưu tiên.
+- Hãy hỏi {student['called_name']} muốn học môn nào.
+- Có thể chọn: Toán, Tiếng Việt, Tiếng Anh, Lịch sử, Địa lý, Tiếng Trung, Kỹ năng giao tiếp, Kỹ năng xử lý vấn đề hoặc EQ/quản lý cảm xúc.
+- Chỉ hỏi đúng MỘT câu ngắn rồi DỪNG để bé chọn.
+- Không bắt đầu bài học trước khi bé chọn môn.
+"""
+        print(
+            f"🎓 BẮT ĐẦU GIA SƯ: {student['called_name']} — CHỜ CHỌN MÔN",
+            flush=True,
+        )
+        combined = "\n".join(
+            part for part in [memory_instruction, subject_prompt] if part
+        )
+        await session.send_realtime_input(text=combined)
+        return
+
     await _original_start_tutor_session(
         session,
         student,
@@ -106,7 +144,7 @@ async def _start_tutor_session_with_memory(session, student, subject=None, switc
     )
 
     student_id = student["student_id"]
-    active_subject = subject or voice.current_subject or "chinese"
+    active_subject = subject
 
     memory_instruction = build_memory_instruction(
         student_id,
@@ -122,6 +160,20 @@ async def _start_tutor_session_with_memory(session, student, subject=None, switc
     )
     if combined:
         await session.send_realtime_input(text=combined)
+
+
+def _current_student_record():
+    """Lấy lại record học sinh hiện tại với called_name để dùng khi bé chọn môn."""
+    if not voice.current_student_id:
+        return None
+    current = voice.STUDENTS.get(voice.current_student_id)
+    if not current:
+        return None
+    return {
+        **current,
+        "called_name": voice.current_student,
+        "official_name": current.get("official_name", voice.current_student),
+    }
 
 
 async def _start_chinese_conversation(session, student):
@@ -189,15 +241,7 @@ async def _process_user_text_with_memory(session, text):
 
     # Chuyển riêng sang giao tiếp tiếng Trung khi Lão sư yêu cầu.
     if _is_chinese_conversation_request(text):
-        target = student
-        if target is None and voice.current_student_id:
-            current = voice.STUDENTS.get(voice.current_student_id)
-            if current:
-                target = {
-                    **current,
-                    "called_name": voice.current_student,
-                    "official_name": current.get("official_name", voice.current_student),
-                }
+        target = student or _current_student_record()
 
         if target is None:
             await session.send_realtime_input(
@@ -207,6 +251,20 @@ async def _process_user_text_with_memory(session, text):
 
         await _start_chinese_conversation(session, target)
         return
+
+    # Nếu đang Tutor Mode và bé đã chọn môn bằng một câu không nhắc lại tên,
+    # ví dụ "Toán", "học Toán", thì dùng đúng học sinh hiện tại.
+    selected_subject = voice.detect_subject(text)
+    if voice.current_mode == voice.TUTOR_MODE and selected_subject:
+        target = student or _current_student_record()
+        if target is not None:
+            await voice.start_tutor_session(
+                session,
+                target,
+                selected_subject,
+                switching=True,
+            )
+            return
 
     # Giữ nguyên luồng voice hiện tại; bộ nhớ + lộ trình chỉ bổ sung context.
     await _original_process_user_text(session, text)
