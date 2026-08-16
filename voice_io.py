@@ -17,7 +17,6 @@ from groq import Groq
 
 import live_voice as brain
 
-
 SAMPLE_RATE = 16000
 CHANNELS = 1
 FRAME_MS = 30
@@ -69,11 +68,6 @@ def _stop_tts_process():
 
 
 async def speak(text):
-    """Phát tiếng Việt bằng Edge Neural TTS trên Windows.
-
-    Không dùng audio output của Gemini. Gemini chỉ làm não và trả text transcript.
-    edge-playback tự phát MP3; trên Windows nó có backend phát riêng.
-    """
     global _tts_process
     text = (text or "").strip()
     if not text:
@@ -88,6 +82,7 @@ async def speak(text):
             "--text", text,
         ]
         print("🔊 TTS → loa:", text, flush=True)
+        process = None
         try:
             _tts_process = subprocess.Popen(
                 command,
@@ -108,11 +103,7 @@ async def speak(text):
             if process.returncode not in (0, None) and error:
                 print("⚠️ TTS lỗi:", error, flush=True)
         except FileNotFoundError:
-            print(
-                "⚠️ Không tìm thấy edge-playback. Chạy: "
-                "pip install edge-tts",
-                flush=True,
-            )
+            print("⚠️ Không tìm thấy edge-playback. Chạy: pip install edge-tts", flush=True)
         except Exception as exc:
             print("⚠️ TTS lỗi:", repr(exc), flush=True)
         finally:
@@ -126,7 +117,6 @@ async def speak(text):
 def _pcm_to_wav(pcm: bytes) -> bytes:
     import io
     import wave
-
     output = io.BytesIO()
     with wave.open(output, "wb") as wav:
         wav.setnchannels(CHANNELS)
@@ -166,11 +156,6 @@ async def transcribe(audio: bytes) -> str:
 # ROUTING: giữ nguyên NÃO GIA SƯ
 # ============================================================
 async def deliver_text_to_brain(session, text):
-    """Đưa transcript vào đúng não hiện có.
-
-    Các lệnh Tutor/lesson vẫn chạy qua live_voice.py.
-    Chỉ hội thoại bình thường mới được gửi thẳng vào Gemini Live.
-    """
     text = (text or "").strip()
     if not text:
         return
@@ -189,8 +174,6 @@ async def deliver_text_to_brain(session, text):
 
     await brain.process_user_text(session, text)
 
-    # Tutor command / lesson answer đã được controller xử lý và controller
-    # tự gửi prompt phù hợp vào Gemini. Không gửi lần hai.
     if handled_by_controller or lesson_answer:
         return
 
@@ -223,10 +206,7 @@ async def microphone_loop(audio_queue):
 
     device_info = sd.query_devices(brain.MIC, "input")
     print(f"🎙️ MIC device {brain.MIC}: {device_info['name']}", flush=True)
-    print(
-        f"🎙️ MIC channels={CHANNELS} rate={SAMPLE_RATE} frame={FRAME_MS}ms",
-        flush=True,
-    )
+    print(f"🎙️ MIC channels={CHANNELS} rate={SAMPLE_RATE} frame={FRAME_MS}ms", flush=True)
 
     with sd.RawInputStream(
         device=brain.MIC,
@@ -243,14 +223,12 @@ async def microphone_loop(audio_queue):
         speech_started = False
         speech_ms = 0
         silence_ms = 0
-        speaking_until = 0.0
 
         while not brain.shutdown_requested:
             frame = await audio_queue.get()
 
-            # Khi Tiểu Vũ đang phát tiếng, bỏ qua microphone để chống echo.
-            # Không để loa tự quay lại thành lời người dùng.
-            if brain.model_speaking or time.monotonic() < speaking_until:
+            # Chặn microphone khi miệng đang phát để không thu ngược TTS.
+            if brain.model_speaking or _tts_process is not None:
                 preroll.clear()
                 speech.clear()
                 speech_started = False
@@ -318,9 +296,7 @@ async def receive_brain(session, tts_queue):
                     print("💗 Tiểu Vũ:", chunk, flush=True)
                     output_text.append(chunk)
 
-            # Cố ý KHÔNG phát inline_data của Gemini.
-            # Đây là điểm thay "miệng": chỉ output_transcription -> Edge TTS.
-
+            # Bỏ qua inline_data của Gemini: đây là phần miệng mới.
             if getattr(server, "turn_complete", False):
                 final_text = " ".join(output_text).strip()
                 output_text.clear()
@@ -343,7 +319,6 @@ async def tts_worker(tts_queue):
 # MAIN VOICE LOOP
 # ============================================================
 async def start_voice_io():
-    # Kiểm tra dependencies/key trước khi mở Gemini để lỗi rõ ràng.
     _groq_client()
 
     brain.shutdown_requested = False
@@ -371,7 +346,6 @@ async def start_voice_io():
                 if not text:
                     continue
                 print("👤 Lão sư:", text, flush=True)
-                # Ngay khi có câu mới, đảm bảo không còn TTS cũ.
                 _stop_tts_process()
                 await deliver_text_to_brain(session, text)
 
