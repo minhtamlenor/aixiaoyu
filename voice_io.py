@@ -6,10 +6,10 @@
 # ============================================================
 
 import asyncio
-import audioop
+import math
 import os
+import struct
 import subprocess
-import time
 from collections import deque
 
 import sounddevice as sd
@@ -26,8 +26,8 @@ END_SILENCE_MS = 720
 MIN_SPEECH_MS = 180
 MAX_UTTERANCE_MS = 15000
 
-# Simple PCM energy VAD. This avoids the native WebRTC VAD package,
-# which currently fails to build under the user's Python 3.14 environment.
+# Simple PCM energy VAD. No native VAD package is required.
+# This is intentionally conservative so Python 3.14 needs no C++ build tools.
 VAD_RMS_THRESHOLD = 420
 
 STT_MODEL = "whisper-large-v3-turbo"
@@ -190,9 +190,14 @@ async def deliver_text_to_brain(session, text):
 # MICROPHONE SEGMENTER
 # ============================================================
 def _is_speech(frame: bytes) -> bool:
-    """Detect speech from 16-bit PCM energy without native dependencies."""
+    """Detect speech from 16-bit PCM RMS without third-party/native modules."""
+    if not frame:
+        return False
     try:
-        return audioop.rms(frame, 2) >= VAD_RMS_THRESHOLD
+        sample_count = len(frame) // 2
+        samples = struct.unpack(f"<{sample_count}h", frame)
+        mean_square = sum(sample * sample for sample in samples) / sample_count
+        return math.sqrt(mean_square) >= VAD_RMS_THRESHOLD
     except Exception:
         return False
 
