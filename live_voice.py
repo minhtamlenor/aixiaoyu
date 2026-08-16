@@ -211,7 +211,7 @@ async def handle_tool_call(session,function_calls):
     if responses: await session.send_tool_response(function_responses=responses)
 
 async def microphone_sender(session):
-    loop=asyncio.get_running_loop(); audio_queue=asyncio.Queue(maxsize=20)
+    loop=asyncio.get_running_loop(); audio_queue=asyncio.Queue(maxsize=20); sent_bytes=0
     def enqueue_audio(data):
         if shutdown_requested:return
         try: audio_queue.put_nowait(data)
@@ -223,9 +223,14 @@ async def microphone_sender(session):
         try: loop.call_soon_threadsafe(enqueue_audio,indata.tobytes())
         except Exception as e: print("⚠️ MIC callback lỗi:",repr(e),flush=True)
     async def sender():
+        nonlocal sent_bytes
         while not shutdown_requested:
             data=await audio_queue.get()
-            try: await session.send_realtime_input(audio=types.Blob(data=data,mime_type="audio/pcm;rate=16000"))
+            try:
+                await session.send_realtime_input(audio=types.Blob(data=data,mime_type="audio/pcm;rate=16000"))
+                sent_bytes+=len(data)
+                if sent_bytes>=32000:
+                    print(f"🎤 MIC → Gemini: {sent_bytes} bytes",flush=True); sent_bytes=0
             except Exception as e: print("⚠️ MIC gửi audio lỗi:",repr(e),flush=True); await asyncio.sleep(0.05)
     with sd.InputStream(device=MIC,samplerate=INPUT_RATE,channels=CHANNELS,dtype="int16",blocksize=BLOCKSIZE,callback=callback):
         print("🎤 Microphone sẵn sàng.",flush=True); await sender()
@@ -284,13 +289,15 @@ async def receive_loop(session,speaker=None):
                 calls=getattr(tool,"function_calls",None)
                 if calls:await handle_tool_call(session,calls)
             server=getattr(response,"server_content",None)
-            if not server:continue
+            if server is None:continue
             if getattr(server,"interrupted",False):
                 print("🛑 Tiểu Vũ bị Lão sư ngắt lời.",flush=True)
                 clear_speaker_queue()
-            input_text=getattr(getattr(server,"input_transcription",None),"text",None)
+            input_transcription=getattr(server,"input_transcription",None)
+            input_text=getattr(input_transcription,"text",None)
             if input_text:
                 clean_text=input_text.strip()
+                print("📝 INPUT TRANSCRIPT:",repr(clean_text),flush=True)
                 if clean_text and clean_text!=input_text_seen:
                     input_text_seen=clean_text
                     await process_user_text(session,clean_text)
@@ -333,7 +340,6 @@ TOOLS: Hỏi giờ dùng current_time. Tính dùng calculator. Ngày dùng curre
         system_instruction=types.Content(parts=[types.Part(text=instruction)]),
         tools=[tools],
         input_audio_transcription={},
-        output_audio_transcription={},
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
                 disabled=False,
