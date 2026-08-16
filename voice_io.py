@@ -74,43 +74,15 @@ async def transcribe(audio: bytes) -> str:
 
 
 async def send_user_text_to_gemini(session, text):
-    """Đưa câu đã được Groq chốt vào Gemini 3.1 Live.
+    """Gửi một câu người dùng đã được Groq chốt thành một turn hoàn chỉnh.
 
-    Gemini 3.1 Live không dùng send_client_content cho user message mới sau
-    khi phiên đã bắt đầu. Text realtime là đường input chính thức; gọi trực
-    tiếp send_realtime_input(text=...) để Gemini bắt đầu turn AUDIO.
+    live_voice.py chủ động tắt automatic VAD vì microphone của hệ thống này
+    do voice_io.py điều khiển. Vì vậy text input cũng phải có activity_start
+    và activity_end; chỉ gửi text đơn lẻ sẽ không chốt turn để Gemini trả lời.
     """
+    await session.send_realtime_input(activity_start=types.ActivityStart())
     await session.send_realtime_input(text=text)
-
-
-async def deliver_text_to_brain(session, text):
-    text = (text or "").strip()
-    if not text:
-        return
-
-    if brain.detect_farewell(text):
-        await brain.process_user_text(session, text)
-        return
-
-    command = brain.detect_tutor_command(text)
-    handled_by_controller = command["intent"] != "chat"
-    lesson_answer = bool(
-        brain.tutor_mode
-        and brain.lesson_session
-        and brain.lesson_waiting_for_answer
-    )
-
-    await brain.process_user_text(session, text)
-
-    # Tutor/lesson controller đã tự gửi prompt vào Gemini.
-    if handled_by_controller or lesson_answer:
-        return
-
-    try:
-        await send_user_text_to_gemini(session, text)
-        print("📨 Đã gửi text realtime vào Gemini 3.1.", flush=True)
-    except Exception as exc:
-        print("⚠️ Gửi text realtime vào Gemini lỗi:", repr(exc), flush=True)
+    await session.send_realtime_input(activity_end=types.ActivityEnd())
 
 
 def _is_speech(frame: bytes) -> bool:
@@ -244,7 +216,32 @@ async def start_voice_io():
                 if not text:
                     continue
                 print("👤 Lão sư:", text, flush=True)
-                await deliver_text_to_brain(session, text)
+
+                # Giữ nguyên toàn bộ command/tutor/personality logic hiện có.
+                # process_user_text chỉ xử lý điều khiển mode; câu chat thật
+                # phải được gửi tiếp vào Gemini như một user turn hoàn chỉnh.
+                if brain.detect_farewell(text):
+                    await brain.process_user_text(session, text)
+                    continue
+
+                command = brain.detect_tutor_command(text)
+                handled_by_controller = command["intent"] != "chat"
+                lesson_answer = bool(
+                    brain.tutor_mode
+                    and brain.lesson_session
+                    and brain.lesson_waiting_for_answer
+                )
+
+                await brain.process_user_text(session, text)
+
+                if handled_by_controller or lesson_answer:
+                    continue
+
+                try:
+                    await send_user_text_to_gemini(session, text)
+                    print("📨 TEXT → GEMINI: turn hoàn chỉnh", flush=True)
+                except Exception as exc:
+                    print("⚠️ TEXT → GEMINI lỗi:", repr(exc), flush=True)
 
         receive_task = asyncio.create_task(brain.receive_loop(session))
         mic_task = asyncio.create_task(audio_worker())
