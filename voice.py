@@ -2,7 +2,10 @@ import asyncio
 import io
 import math
 import os
+import random
+import re
 import struct
+import unicodedata
 import wave
 
 import sounddevice as sd
@@ -10,11 +13,17 @@ from groq import Groq
 from google import genai
 from google.genai import types
 
+from personality import SYSTEM_INSTRUCTION as PERSONALITY_INSTRUCTION
+from tools.time_tool import get_time_text
+from tools.calculator import calculate
+from tools.calendar_tool import get_calendar_text
+
 
 # ============================================================
-# TIỂU VŨ VOICE
+# TIỂU VŨ - VOICE RUNTIME
+# Âm thanh có thể thay đổi; phần NÃO/GIA SƯ/TOOLS được giữ ổn định.
 # Tai  = Groq Whisper
-# Não  = Gemini Live
+# Não  = Gemini Live + personality + tutor mode
 # Miệng = Gemini Live native AUDIO
 # ============================================================
 
@@ -34,70 +43,331 @@ MAX_SPEECH_MS = 45000
 
 CHAT_MODE = "chat"
 TUTOR_MODE = "tutor"
-CURRENT_MODE = CHAT_MODE
+current_mode = CHAT_MODE
 
-TUTOR_TRIGGERS = [
-    "mini muốn học", "mini muon hoc",
-    "đậu phộng muốn học", "dậu phộng muốn học", "dau phong muon hoc",
-    "mini học", "mini hoc", "đậu phộng học", "dau phong hoc",
-    "cho mini học", "cho đậu phộng học",
-    "bắt đầu học", "bat dau hoc", "vào học", "vao hoc", "học đi", "hoc di",
+# ============================================================
+# HỌC SINH / MÔN HỌC
+# ============================================================
+
+STUDENTS = {
+    "minh_tien": {
+        "student_id": "minh_tien",
+        "official_name": "Minh Tiên",
+        "gender": "male",
+        "grade": 4,
+        "aliases": ["Minh Tiên", "Minh Tien", "Đậu Đậu", "Dau Dau", "Đậu Phộng", "Dau Phong", "Đậu Phụng", "Dau Phung"],
+    },
+    "nha_tien": {
+        "student_id": "nha_tien",
+        "official_name": "Nhã Tiên",
+        "gender": "female",
+        "grade": 6,
+        "aliases": ["Nhã Tiên", "Nha Tien", "Mini", "Meanie", "미니"],
+    },
+}
+
+STUDENT_ALIASES = {}
+for student in STUDENTS.values():
+    for alias in student["aliases"]:
+        STUDENT_ALIASES[alias.lower()] = {
+            "student_id": student["student_id"],
+            "official_name": student["official_name"],
+            "called_name": alias,
+            "gender": student["gender"],
+            "grade": student["grade"],
+        }
+
+SUBJECT_ROTATION = [
+    "chinese", "math", "vietnamese", "english", "history",
+    "geography", "communication", "problem_solving", "emotional_intelligence",
 ]
 
-SYSTEM_INSTRUCTION = """
-Bạn là Tiểu Vũ.
-Bạn là một cô gái Việt Nam thân thiện, dễ thương, tự nhiên, hơi tinh nghịch và gần gũi.
-Bạn đang trò chuyện với Lão sư.
+SUBJECT_NAMES = {
+    "chinese": "Tiếng Trung HSK 3.0",
+    "math": "Toán",
+    "vietnamese": "Tiếng Việt",
+    "english": "Tiếng Anh",
+    "history": "Lịch sử",
+    "geography": "Địa lý",
+    "communication": "Kỹ năng giao tiếp",
+    "problem_solving": "Kỹ năng xử lý vấn đề",
+    "emotional_intelligence": "EQ và quản lý cảm xúc",
+}
 
-QUY TẮC:
-- Không tự nói thay người dùng.
-- Không tự đóng vai học sinh.
-- Không tự hỏi rồi tự trả lời.
-- Không tự tạo câu trả lời của Mini.
-- Chỉ trả lời khi có lời nói của người dùng hoặc chương trình gia sư yêu cầu đọc câu hỏi.
+current_student = None
+current_student_id = None
+current_subject = None
+current_grade = None
+rotation_index = 0
+last_subject = None
 
-CHAT MODE:
-- Nói chuyện tự nhiên với Lão sư.
-- Có thể trả lời và đùa vui.
-- Không tự tạo hội thoại.
 
-TUTOR MODE:
-- Đang dạy Mini.
-- Chờ chương trình cung cấp câu hỏi hoặc phản hồi.
-- Không tự quyết định đáp án, điểm số hay câu hỏi tiếp theo.
-
-XƯNG HÔ:
-Người dùng là Minh Tâm, nam. Gọi là “Lão sư”.
-Tiểu Vũ là nữ, giọng thân mật, tự nhiên, miền Nam Việt Nam.
-Không gọi Minh Tâm là bà, chị, cô, nàng, mẹ.
-
-Nói ngắn gọn, tự nhiên, không độc thoại.
-"""
+# ============================================================
+# GEMINI
+# ============================================================
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 groq = Groq(api_key=os.environ["GROQ_API_KEY"])
 
+shutdown_requested = False
 listen_enabled = False
 model_speaking = False
-shutdown_requested = False
+output = None
 
 
-def normalize_text(text: str) -> str:
-    return (
-        (text or "")
-        .strip()
-        .lower()
-        .replace(".", "")
-        .replace(",", "")
-        .replace("!", "")
-        .replace("?", "")
+# ============================================================
+# TEXT / DETECTION
+# ============================================================
+
+def normalize_text(text):
+    text = (text or "").strip().lower()
+    return re.sub(r"\s+", " ", text)
+
+
+def remove_accents(text):
+    normalized = unicodedata.normalize("NFD", text or "")
+    result = "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+    return result.replace("đ", "d").replace("Đ", "D").lower().strip()
+
+
+def mentions_teacher(text):
+    n = normalize_text(text)
+    a = remove_accents(n)
+    return "lão sư" in n or "lao su" in a
+
+
+def detect_student(text):
+    n = normalize_text(text)
+    a = remove_accents(n)
+    aliases = sorted(STUDENT_ALIASES.items(), key=lambda item: len(item[0]), reverse=True)
+    for alias, student in aliases:
+        if alias in n or remove_accents(alias) in a:
+            return student
+    return None
+
+
+def detect_subject(text):
+    n = normalize_text(text)
+    a = remove_accents(n)
+    patterns = {
+        "chinese": ["tiếng trung", "tiếng hoa", "trung văn", "chinese", "hsk"],
+        "math": ["toán", "math", "phép cộng", "phép trừ", "phép nhân", "phép chia", "cửu chương", "bảng nhân", "bảng chia"],
+        "vietnamese": ["tiếng việt", "ngữ văn"],
+        "english": ["tiếng anh", "english"],
+        "history": ["lịch sử", "history"],
+        "geography": ["địa lý", "geography"],
+        "communication": ["giao tiếp", "communication"],
+        "problem_solving": ["xử lý vấn đề", "giải quyết vấn đề", "problem solving"],
+        "emotional_intelligence": ["cảm xúc", "quản lý cảm xúc", "eq", "trí tuệ cảm xúc"],
+    }
+    for subject, words in patterns.items():
+        for word in words:
+            if word in n or remove_accents(word) in a:
+                return subject
+    return None
+
+
+def detect_learning_intent(text):
+    n = normalize_text(text)
+    a = remove_accents(n)
+    patterns = [
+        "muốn học", "bắt đầu học", "bắt đầu bài học", "học đi", "học nha", "học nhé",
+        "học thôi", "vào học", "vô học", "cho con học", "học bài", "giờ học",
+        "đến giờ học", "tới giờ học",
+    ]
+    return any(p in n or remove_accents(p) in a for p in patterns)
+
+
+def detect_tutor_command(text):
+    student = detect_student(text)
+    subject = detect_subject(text)
+    learning = detect_learning_intent(text)
+    if mentions_teacher(text):
+        return {"intent": "chat", "student": None, "subject": None}
+    if student and learning:
+        return {"intent": "start_lesson", "student": student, "subject": subject}
+    if student:
+        return {"intent": "switch_student", "student": student, "subject": subject}
+    if learning:
+        return {"intent": "unknown_student", "student": None, "subject": subject}
+    return {"intent": "chat", "student": None, "subject": None}
+
+
+def get_next_subject():
+    global rotation_index, last_subject
+    if last_subject is None:
+        last_subject = SUBJECT_ROTATION[0]
+        rotation_index = 0
+        return last_subject
+    rotation_index = (rotation_index + 1) % len(SUBJECT_ROTATION)
+    last_subject = SUBJECT_ROTATION[rotation_index]
+    return last_subject
+
+
+# ============================================================
+# TUTOR MODE
+# ============================================================
+
+async def start_tutor_session(session, student, subject=None, switching=False):
+    global current_mode, current_student, current_student_id, current_subject, current_grade
+    global rotation_index, last_subject
+
+    if subject is None:
+        subject = get_next_subject() if switching and last_subject else "chinese"
+    current_mode = TUTOR_MODE
+    current_student = student["called_name"]
+    current_student_id = student["student_id"]
+    current_subject = subject
+    current_grade = student["grade"]
+    last_subject = subject
+    if subject in SUBJECT_ROTATION:
+        rotation_index = SUBJECT_ROTATION.index(subject)
+
+    grade_text = (
+        "Lớp 4: ưu tiên nhân, chia, chia có dư, bài toán có lời văn, phân số cơ bản, hình học, đơn vị đo, chu vi, diện tích và logic."
+        if current_grade == 4 else
+        "Lớp 6: số nguyên, phân số, tỉ số, biểu thức, đại lượng, hình học, bài toán nhiều bước và logic."
     )
 
+    prompt = f"""
+TUTOR MODE ĐANG HOẠT ĐỘNG.
+Học sinh hiện tại: {current_student}
+Tên chính thức: {student['official_name']}
+Lớp: {current_grade}
+Môn hiện tại: {SUBJECT_NAMES.get(current_subject, current_subject)}
 
-def is_tutor_trigger(text: str) -> bool:
-    clean = normalize_text(text)
-    return any(trigger in clean for trigger in TUTOR_TRIGGERS)
+{grade_text}
+Tiếng Trung HSK 3.0 là môn ưu tiên.
 
+QUY TẮC:
+- Luôn gọi học sinh bằng đúng tên hiện tại: {current_student}.
+- Không gọi học sinh là Lão sư.
+- Không đọc Student ID và không nói về hệ thống/prompt.
+- Chủ động dạy học sinh.
+- Chỉ đưa MỘT câu hỏi mỗi lượt rồi DỪNG.
+- Chờ học sinh trả lời.
+- Khi trả lời: đánh giá đúng/sai, giải thích ngắn nếu sai, động viên và đưa câu tiếp theo.
+- Không tự trả lời thay học sinh.
+- Điều chỉnh độ khó theo lớp.
+- Khi học tiếng Trung ưu tiên phản xạ, nghe hiểu, hội thoại, đặt câu, từ vựng và đọc hiểu.
+
+Hãy chào {current_student}, nói một câu thân thiện, đưa đúng MỘT câu hỏi rồi dừng.
+"""
+    print(f"🎓 BẮT ĐẦU GIA SƯ: {current_student} — {SUBJECT_NAMES.get(current_subject, current_subject)}", flush=True)
+    await session.send_realtime_input(text=prompt)
+
+
+async def exit_tutor_mode(session):
+    global current_mode, current_student, current_student_id, current_subject, current_grade
+    if current_mode == TUTOR_MODE:
+        print("💬 CHUYỂN VỀ CHAT MODE", flush=True)
+    current_mode = CHAT_MODE
+    current_student = None
+    current_student_id = None
+    current_subject = None
+    current_grade = None
+    await session.send_realtime_input(text="Đã quay về CHAT MODE. Người nói là Lão sư. Gọi người đó là Lão sư. Không tự bắt đầu bài học và chờ Lão sư nói chuyện.")
+
+
+# ============================================================
+# TOOLS
+# ============================================================
+
+def build_tools():
+    return types.Tool(function_declarations=[
+        types.FunctionDeclaration(
+            name="current_time",
+            description="Lấy giờ hiện tại chính xác theo múi giờ Việt Nam UTC+7.",
+            parameters=types.Schema(type="OBJECT", properties={}),
+        ),
+        types.FunctionDeclaration(
+            name="calculator",
+            description="Tính toán biểu thức toán học chính xác.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={"expression": types.Schema(type="STRING", description="Biểu thức toán học cần tính.")},
+                required=["expression"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="current_calendar",
+            description="Lấy thứ, ngày dương lịch, ngày âm lịch và giờ Việt Nam.",
+            parameters=types.Schema(type="OBJECT", properties={}),
+        ),
+    ])
+
+
+async def handle_tool_call(session, function_calls):
+    responses = []
+    for call in function_calls:
+        name = call.name
+        args = call.args or {}
+        print(f"🛠️ Tiểu Vũ dùng tool: {name}", flush=True)
+        try:
+            if name == "current_time":
+                result = get_time_text()
+            elif name == "calculator":
+                result = calculate(args.get("expression", ""))
+            elif name == "current_calendar":
+                result = get_calendar_text()
+            else:
+                result = "Không tìm thấy công cụ này."
+        except Exception as exc:
+            result = f"Lỗi tool: {exc}"
+        responses.append(types.FunctionResponse(id=call.id, name=name, response={"result": result}))
+    if responses:
+        await session.send_tool_response(function_responses=responses)
+
+
+# ============================================================
+# GEMINI TEXT ROUTER
+# ============================================================
+
+async def process_user_text(session, text):
+    global current_mode, current_student, current_student_id, current_subject
+
+    if not text:
+        return
+    print(f"👤 Lão sư: {text}", flush=True)
+    command = detect_tutor_command(text)
+    intent = command["intent"]
+    student = command["student"]
+    subject = command["subject"]
+
+    # Khi Lão sư nói trực tiếp với Tiểu Vũ, luôn quay lại Chat Mode.
+    if mentions_teacher(text):
+        await exit_tutor_mode(session)
+        await session.send_realtime_input(text=text)
+        return
+
+    if intent == "start_lesson":
+        await start_tutor_session(session, student, subject, switching=(current_mode == TUTOR_MODE))
+        return
+
+    if intent == "switch_student":
+        if current_mode == TUTOR_MODE and student["student_id"] == current_student_id:
+            if subject:
+                current_subject = subject
+                await session.send_realtime_input(text=f"Tiếp tục với {current_student}. Chuyển sang môn {SUBJECT_NAMES.get(subject, subject)}. Hãy đưa một câu hỏi mới phù hợp lớp {current_grade}, chỉ hỏi một câu rồi dừng.")
+            else:
+                next_subject = get_next_subject()
+                current_subject = next_subject
+                await session.send_realtime_input(text=f"Tiếp tục với {current_student}. Chuyển sang môn {SUBJECT_NAMES[next_subject]}. Chỉ đưa một câu hỏi rồi dừng.")
+            return
+        await start_tutor_session(session, student, subject, switching=(current_mode == TUTOR_MODE))
+        return
+
+    if intent == "unknown_student":
+        await session.send_realtime_input(text="Người nói muốn bắt đầu học nhưng chưa nói tên học sinh. Hãy hỏi thật ngắn: Tiểu Vũ dạy Mini hay Minh Tiên nè? Chỉ hỏi một câu.")
+        return
+
+    # Chat hoặc câu trả lời trong Tutor Mode được gửi nguyên văn cho Gemini.
+    await send_text(session, text)
+
+
+# ============================================================
+# AUDIO - GIỮ ĐƠN GIẢN, KHÔNG ĐỂ AUDIO LẤN ÁT LOGIC NÃO
+# ============================================================
 
 def pcm_to_wav(pcm: bytes) -> bytes:
     out = io.BytesIO()
@@ -130,13 +400,12 @@ def transcribe(pcm: bytes) -> str:
     return (getattr(result, "text", "") or "").strip()
 
 
-async def send_text(session, text: str):
+async def send_text(session, text):
     await session.send_realtime_input(text=text)
 
 
 async def microphone_loop(session):
-    global listen_enabled, shutdown_requested, CURRENT_MODE
-
+    global listen_enabled, shutdown_requested
     loop = asyncio.get_running_loop()
     queue = asyncio.Queue(maxsize=100)
     preroll = []
@@ -156,37 +425,22 @@ async def microphone_loop(session):
         if status:
             print("MIC:", status, flush=True)
         if listen_enabled and not model_speaking:
-            # RawInputStream supplies a cffi buffer, not a numpy array.
-            # Convert it directly to bytes and schedule the normal queue
-            # callback on the asyncio event loop thread.
-            data = bytes(indata)
-            loop.call_soon_threadsafe(enqueue, data)
+            loop.call_soon_threadsafe(enqueue, bytes(indata))
 
     device = sd.query_devices(MIC, "input")
     print(f"🎙️ MIC device {MIC}: {device['name']}", flush=True)
     print(f"🎙️ MIC channels={CHANNELS} rate={INPUT_RATE} frame={FRAME_MS}ms", flush=True)
-    print(f"🎙️ VAD threshold={VAD_THRESHOLD} RMS", flush=True)
 
-    with sd.RawInputStream(
-        device=MIC,
-        samplerate=INPUT_RATE,
-        channels=CHANNELS,
-        dtype="int16",
-        blocksize=BLOCKSIZE,
-        callback=callback,
-    ):
+    with sd.RawInputStream(device=MIC, samplerate=INPUT_RATE, channels=CHANNELS, dtype="int16", blocksize=BLOCKSIZE, callback=callback):
         while not shutdown_requested:
             frame = await queue.get()
             if not listen_enabled or model_speaking:
                 preroll.clear()
                 continue
-
-            level = rms(frame)
             preroll.append(frame)
             if len(preroll) > 10:
                 preroll.pop(0)
-
-            if level < VAD_THRESHOLD:
+            if rms(frame) < VAD_THRESHOLD:
                 continue
 
             print("🟢 MIC: bắt đầu nghe", flush=True)
@@ -207,9 +461,7 @@ async def microphone_loop(session):
 
             listen_enabled = False
             preroll.clear()
-
             if speech_ms < MIN_SPEECH_MS:
-                print("🔴 MIC: câu quá ngắn, bỏ qua", flush=True)
                 listen_enabled = True
                 continue
 
@@ -220,53 +472,53 @@ async def microphone_loop(session):
                 print("⚠️ Groq Whisper lỗi:", repr(exc), flush=True)
                 listen_enabled = True
                 continue
-
             if not text:
                 print("📝 Groq Whisper: không nhận được text", flush=True)
                 listen_enabled = True
                 continue
 
             print("📝 Groq Whisper:", text, flush=True)
-            print("👤 Lão sư:", text, flush=True)
+            await process_user_text(session, text)
 
-            if CURRENT_MODE == CHAT_MODE and is_tutor_trigger(text):
-                CURRENT_MODE = TUTOR_MODE
-                print("🎓 CHUYỂN SANG CHẾ ĐỘ GIA SƯ", flush=True)
 
-            try:
-                await send_text(session, text)
-                print("📨 TEXT → GEMINI: đã gửi", flush=True)
-            except Exception as exc:
-                print("⚠️ Gemini nhận text lỗi:", repr(exc), flush=True)
-                listen_enabled = True
-
+# ============================================================
+# GEMINI RECEIVE
+# ============================================================
 
 async def receive_loop(session):
     global listen_enabled, model_speaking, shutdown_requested
 
     while not shutdown_requested:
         async for response in session.receive():
-            if response.server_content is None:
+            tool_call = getattr(response, "tool_call", None)
+            if tool_call is not None:
+                calls = getattr(tool_call, "function_calls", None)
+                if calls:
+                    await handle_tool_call(session, calls)
+
+            content = getattr(response, "server_content", None)
+            if content is None:
                 continue
 
-            content = response.server_content
-
-            if content.output_transcription:
-                text = content.output_transcription.text
+            output_transcription = getattr(content, "output_transcription", None)
+            if output_transcription is not None:
+                text = getattr(output_transcription, "text", None)
                 if text:
                     print("💗 Tiểu Vũ:", text, flush=True)
 
-            if content.model_turn:
-                for part in content.model_turn.parts:
-                    if part.inline_data and part.inline_data.data:
+            model_turn = getattr(content, "model_turn", None)
+            if model_turn is not None:
+                for part in getattr(model_turn, "parts", []) or []:
+                    inline = getattr(part, "inline_data", None)
+                    data = getattr(inline, "data", None) if inline else None
+                    if data:
                         if not model_speaking:
                             model_speaking = True
                             listen_enabled = False
                             print("🔊 Tiểu Vũ đang nói...", flush=True)
-                        audio = part.inline_data.data
-                        output.write(audio)
+                        output.write(data)
 
-            if content.turn_complete:
+            if getattr(content, "turn_complete", False):
                 if model_speaking:
                     output.stop()
                     output.close()
@@ -276,16 +528,9 @@ async def receive_loop(session):
                 print("\n🎤 Tiểu Vũ đang nghe...", flush=True)
 
 
-output = None
-
-
 def reopen_output():
     global output
-    output = sd.RawOutputStream(
-        samplerate=OUTPUT_RATE,
-        channels=1,
-        dtype="int16",
-    )
+    output = sd.RawOutputStream(samplerate=OUTPUT_RATE, channels=1, dtype="int16")
     output.start()
 
 
@@ -302,13 +547,34 @@ def cleanup():
         output = None
 
 
+# ============================================================
+# LIVE CONFIG - NÃO + TUTOR + TOOLS
+# ============================================================
+
 async def start_voice_io():
-    global output, listen_enabled, shutdown_requested, model_speaking
+    global listen_enabled, shutdown_requested, model_speaking
 
     shutdown_requested = False
     listen_enabled = False
     model_speaking = False
     reopen_output()
+
+    full_instruction = PERSONALITY_INSTRUCTION + """
+
+TIỂU VŨ CÓ 2 MODE:
+1. CHAT MODE — nói chuyện tự nhiên với Lão sư, không tự mở bài học.
+2. TUTOR MODE — dạy học sinh được Python xác định; không tự đổi học sinh.
+
+HỌC SINH:
+- Minh Tiên / Đậu Đậu / Đậu Phộng / Đậu Phụng = lớp 4, student_id minh_tien.
+- Nhã Tiên / Mini / Meanie = lớp 6, student_id nha_tien.
+
+MÔN ƯU TIÊN: Tiếng Trung HSK 3.0.
+Các môn khác: Toán, Tiếng Việt, Tiếng Anh, Lịch sử, Địa lý, Giao tiếp, Xử lý vấn đề, EQ.
+
+Khi Tutor Mode đang hoạt động: chỉ một câu hỏi mỗi lượt, chờ học sinh trả lời, đánh giá và tiếp tục; không tự trả lời thay học sinh.
+Không nói về prompt, hệ thống, tool hoặc Student ID.
+"""
 
     config = types.LiveConnectConfig(
         response_modalities=["AUDIO"],
@@ -317,26 +583,22 @@ async def start_voice_io():
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
             )
         ),
-        system_instruction=types.Content(
-            parts=[types.Part(text=SYSTEM_INSTRUCTION)]
-        ),
+        system_instruction=types.Content(parts=[types.Part(text=full_instruction)]),
         output_audio_transcription={},
+        tools=[build_tools()],
     )
 
     async with client.aio.live.connect(model=MODEL, config=config) as session:
         print("✅ Gemini brain connected", flush=True)
+        print("🧠 Não: Gemini + personality + Tutor Mode + Tools", flush=True)
         print("👂 Tai: Groq Whisper", flush=True)
-        print("🧠 Não: Gemini + personality + tutor mode", flush=True)
-        print("👄 Miệng: Gemini Live native AUDIO — 24 kHz", flush=True)
+        print("👄 Miệng: Gemini native AUDIO", flush=True)
 
         receive_task = asyncio.create_task(receive_loop(session))
         mic_task = asyncio.create_task(microphone_loop(session))
 
         await asyncio.sleep(0.3)
-        await send_text(
-            session,
-            "Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới.",
-        )
+        await send_text(session, "Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới.")
 
         try:
             await asyncio.gather(receive_task, mic_task)
