@@ -241,7 +241,7 @@ async def send_startup_greeting(session):
     hour = datetime.now().hour
     time_hint = "Đây là buổi sáng sớm." if hour < 7 else ""
     startup_greeting_sent = True
-    prompt = f"""Tiểu Vũ vừa kết nối với Lão sư Minh Tâm.\n{time_hint}\nHãy chủ động mở đầu cuộc trò chuyện bằng một lời chào tự nhiên, thân thiện, vui vẻ đúng tính cách Tiểu Vũ trong personality.py. Nếu là trước 07:00, chào buổi sáng Lão sư. Có thể hỏi thăm Lão sư một câu ngắn. Không nói về hệ thống, Python, prompt hay chế độ kỹ thuật. Sau lời chào hãy chờ Lão sư nói."""
+    prompt = f"""Tiểu Vũ vừa kết nối với Lão sư Minh Tâm.\n{time_hint}\nHãy chủ động mở đầu cuộc trò chuyện theo đúng thứ tự: câu đầu tiên bắt buộc phải là một lời chào có ý "Chào Lão sư!" hoặc "Chào Lão sư!". Sau đó mới thêm một câu hỏi thăm ngắn, tự nhiên và thân thiện. Nếu là trước 07:00, có thể chào buổi sáng Lão sư. Giữ đúng tính cách Tiểu Vũ trong personality.py. Không nói về hệ thống, Python, prompt hay chế độ kỹ thuật. Sau lời chào và hỏi thăm, hãy chờ Lão sư nói."""
     try:
         command_suppressed_until = 0.0
         await session.send_realtime_input(text=prompt)
@@ -302,9 +302,10 @@ async def start_tutor_session(session, student, subject=None):
     print(); print("🎓 BẮT ĐẦU HỌC", flush=True); print("👤", current_student, flush=True); print("📚", SUBJECT_NAMES[selected_subject], flush=True)
     try:
         question_speech = await start_voice_lesson(student, selected_subject)
+        chinese_pronunciation = "\nKHI MÔN LÀ TIẾNG TRUNG: đọc toàn bộ tiếng Trung bằng Mandarin/Putonghua (普通话) chuẩn, phát âm rõ từng âm tiết và thanh điệu; không đọc Hán ngữ theo cách phát âm tiếng Việt."
         await send_text_command(
             session,
-            f"""TUTOR MODE.\nPython đã xác định học sinh: {current_student}\nMôn hiện tại: {SUBJECT_NAMES[selected_subject]}\nLesson flow đã tạo câu hỏi đầu tiên:\n{question_speech}\nHãy chào {current_student} thật tự nhiên, sau đó đọc đúng câu hỏi trên. Không tự đổi học sinh, không tự đổi môn, không thêm câu hỏi ngoài lesson flow. Sau khi hỏi xong, chờ học sinh trả lời.""",
+            f"""TUTOR MODE.\nPython đã xác định học sinh: {current_student}\nMôn hiện tại: {SUBJECT_NAMES[selected_subject]}\nLesson flow đã tạo câu hỏi đầu tiên:\n{question_speech}\n{chinese_pronunciation}\nHãy chào {current_student} thật tự nhiên, sau đó đọc đúng câu hỏi trên. Không tự đổi học sinh, không tự đổi môn, không thêm câu hỏi ngoài lesson flow. Sau khi hỏi xong, chờ học sinh trả lời.""",
             3,
         )
         return
@@ -312,7 +313,7 @@ async def start_tutor_session(session, student, subject=None):
         print("⚠️ Không khởi động được lesson flow:", repr(e), flush=True)
     await send_text_command(
         session,
-        f"""TUTOR MODE.\nHọc sinh: {current_student}\nLớp: {grade}\nMôn: {SUBJECT_NAMES[selected_subject]}\n{get_level_instruction(grade)}\nChỉ gọi học sinh là {current_student}. Không tự đổi môn hoặc học sinh. Mỗi lần chỉ hỏi một câu. Chào học sinh và đưa một câu hỏi.""",
+        f"""TUTOR MODE.\nHọc sinh: {current_student}\nLớp: {grade}\nMôn: {SUBJECT_NAMES[selected_subject]}\n{get_level_instruction(grade)}\nChỉ gọi học sinh là {current_student}. Không tự đổi môn hoặc học sinh. Mỗi lần chỉ hỏi một câu. Chào học sinh và đưa một câu hỏi. Khi môn là Tiếng Trung, luôn phát âm bằng Mandarin/Putonghua (普通话) chuẩn, đúng âm tiết và thanh điệu, không đọc theo phát âm tiếng Việt.""",
         3,
     )
 
@@ -476,10 +477,10 @@ async def queue_speaker_audio(data):
 # protocol. The client controls turn boundaries and keeps a small pre-roll so
 # the first consonants of a sentence are not cut off.
 VAD_SILENCE_MS = 800
-VAD_PREROLL_MS = 200
+VAD_PREROLL_MS = 300
 VAD_MIN_SPEECH_MS = 160
-VAD_MIN_RMS = 450.0
-VAD_NOISE_MULTIPLIER = 2.2
+VAD_MIN_RMS = 220.0
+VAD_NOISE_MULTIPLIER = 1.6
 VAD_LOG_INTERVAL = 0.75
 
 
@@ -745,7 +746,8 @@ TIỂU VŨ LIVE VOICE.
 CHAT MODE: Nói chuyện với Lão sư Minh Tâm như một người bạn thân. Giữ personality.py: nữ, miền Nam, thân thiện, tự nhiên, vui tính, hơi tinh nghịch.
 TUTOR MODE: Python quyết định học sinh. Python/lesson flow quyết định câu hỏi và độ khó. Không tự đổi tên, không tự đổi môn, không tự restart bài học. Nói với học sinh bằng giọng cô gia sư hoà nhã, khích lệ.
 CHUYỂN MODE: Khi nhận diện Mini hoặc Đậu Đậu/Đậu Phộng muốn học, vào Tutor Mode. Khi đang nói với Lão sư, giữ CHAT MODE.
-STARTUP: Khi Python yêu cầu lời chào khởi động, chủ động mở lời tự nhiên rồi chờ Lão sư.
+STARTUP: Khi Python yêu cầu lời chào khởi động, câu đầu tiên bắt buộc phải là "Chào Lão sư!" hoặc một câu chào tương đương có đúng ý "Chào Lão sư!". Sau câu chào mới được hỏi thăm Lão sư. Không đảo thứ tự.
+TIẾNG TRUNG: Khi nói hoặc đọc tiếng Trung, luôn dùng Mandarin/Putonghua (普通话) chuẩn. Phát âm rõ âm tiết và thanh điệu, đặc biệt khi đọc câu hỏi, từ vựng hoặc nội dung HSK. Không đọc Hán ngữ theo cách phát âm tiếng Việt. Khi nội dung đang là tiếng Trung thì ưu tiên phát âm tiếng Quan thoại chuẩn.
 TOOLS: Hỏi giờ dùng current_time. Tính dùng calculator. Ngày dùng current_calendar. Không đoán dữ liệu.
 """
 
