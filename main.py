@@ -54,16 +54,9 @@ async def _process_user_text_with_memory(session, text):
                 flush=True,
             )
 
+    # Giữ nguyên luồng voice hiện tại; bộ nhớ chỉ được nạp khi bắt đầu
+    # phiên Tutor tiếp theo, tránh tạo thêm một lượt phản hồi âm thanh.
     await _original_process_user_text(session, text)
-
-    # Nếu bé vừa nói một sở thích mới, cập nhật ngay ngữ cảnh Gemini.
-    if student_id:
-        memory_instruction = build_memory_instruction(
-            student_id,
-            student["official_name"] if student else (voice.current_student or student_id),
-        )
-        if memory_instruction:
-            await session.send_realtime_input(text=memory_instruction)
 
 
 voice.start_tutor_session = _start_tutor_session_with_memory
