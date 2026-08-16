@@ -1,42 +1,44 @@
 name: Rebuild Live Voice input transport
 
-"on":
-  push:
-    branches:
-      - main
+on: push
 
 permissions:
   contents: write
 
 jobs:
   rebuild:
-    if: "!contains(github.event.head_commit.message, 'Rebuild Live Voice input transport')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Replace microphone transport with proven path
+
+      - name: Patch live_voice.py
+        shell: python
         run: |
-          python - <<'PY'
           from pathlib import Path
-          p = Path('live_voice.py')
-          s = p.read_text(encoding='utf-8')
-          start_marker = '# ============================================================\n# MICROPHONE: MANUAL VAD'
-          end_marker = '# ============================================================\n# RECEIVE LOOP'
-          start = s.index(start_marker)
-          end = s.index(end_marker, start)
-          new_microphone = '''# ============================================================
+
+          p = Path("live_voice.py")
+          s = p.read_text(encoding="utf-8")
+
+          start_marker = "# ============================================================\n# MICROPHONE: MANUAL VAD"
+          end_marker = "# ============================================================\n# RECEIVE LOOP"
+          start = s.find(start_marker)
+          end = s.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit("Manual VAD block not found; refusing to modify live_voice.py")
+
+          microphone = '''# ============================================================
 # MICROPHONE: GEMINI AUTOMATIC VAD
 # ============================================================
-# Match tools/test_live_mic.py: stream 16 kHz PCM continuously and let Gemini Live own turn detection.
+# Keep this transport identical to tools/test_live_mic.py:
+# sounddevice -> 16 kHz PCM -> Gemini Live. Gemini owns turn detection.
 
 async def microphone_sender(session):
     global listen_ready, model_speaking
     loop = asyncio.get_running_loop()
     audio_queue = asyncio.Queue(maxsize=80)
-    stopped = False
 
     def enqueue(data):
-        if stopped or shutdown_requested:
+        if shutdown_requested:
             return
         try:
             audio_queue.put_nowait(data)
@@ -54,18 +56,15 @@ async def microphone_sender(session):
         if status:
             print("MIC:", status, flush=True)
         try:
-            loop.call_soon_threadsafe(enqueue, indata.tobytes())
+            loop.call_soon_threadsafe(enqueue, bytes(indata))
         except Exception as e:
             print("⚠️ MIC callback lỗi:", repr(e), flush=True)
 
-    try:
-        device_info = sd.query_devices(MIC, "input")
-        print(f"🎙️ MIC device {MIC}: {device_info['name']}", flush=True)
-        print(f"🎙️ MIC channels={CHANNELS} rate={INPUT_RATE} block={BLOCKSIZE}", flush=True)
-    except Exception as e:
-        print("⚠️ Không đọc được thông tin MIC:", repr(e), flush=True)
+    device_info = sd.query_devices(MIC, "input")
+    print(f"🎙️ MIC device {MIC}: {device_info['name']}", flush=True)
+    print(f"🎙️ MIC channels={CHANNELS} rate={INPUT_RATE} block={BLOCKSIZE}", flush=True)
 
-    with sd.InputStream(
+    with sd.RawInputStream(
         device=MIC,
         samplerate=INPUT_RATE,
         channels=CHANNELS,
@@ -78,8 +77,11 @@ async def microphone_sender(session):
         sent = 0
         while not shutdown_requested:
             data = await audio_queue.get()
+
+            # Do not feed the speaker output back into Gemini.
             if not listen_ready or model_speaking:
                 continue
+
             try:
                 await session.send_realtime_input(
                     audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
@@ -88,18 +90,21 @@ async def microphone_sender(session):
             except Exception as e:
                 print("⚠️ MIC gửi audio lỗi:", repr(e), flush=True)
                 continue
+
             if sent >= 32000:
                 print(f"🎤 MIC → Gemini: {sent} bytes", flush=True)
                 sent = 0
 
 '''
-          s = s[:start] + new_microphone + s[end:]
-          old_config = '''        # Automatic VAD is deliberately disabled. microphone_sender owns the
+
+          s = s[:start] + microphone + s[end:]
+
+          old = '''        # Automatic VAD is deliberately disabled. microphone_sender owns the
         # activity_start/activity_end boundaries.
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
         ),'''
-          new_config = '''        # Match tools/test_live_mic.py: Gemini owns turn detection.
+          new = '''        # Same turn-detection path proven by tools/test_live_mic.py.
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
                 disabled=False,
@@ -109,19 +114,20 @@ async def microphone_sender(session):
                 silence_duration_ms=500,
             )
         ),'''
-          if old_config not in s:
-              raise SystemExit('Expected disabled VAD config not found; refusing to modify live_voice.py')
-          s = s.replace(old_config, new_config, 1)
-          p.write_text(s, encoding='utf-8')
-          PY
-      - name: Verify
-        run: |
-          python -m py_compile live_voice.py
-          git diff --check
-      - name: Commit live_voice.py
+          if old not in s:
+              raise SystemExit("Disabled VAD config not found; refusing to modify config")
+          s = s.replace(old, new, 1)
+
+          p.write_text(s, encoding="utf-8")
+
+      - name: Verify Python syntax
+        run: python -m py_compile live_voice.py
+
+      - name: Commit only live_voice.py and remove this workflow
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add live_voice.py
+          git rm .github/workflows/rebuild-live-input.yml
           git commit -m "Rebuild Live Voice input transport"
           git push
