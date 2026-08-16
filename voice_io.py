@@ -74,19 +74,13 @@ async def transcribe(audio: bytes) -> str:
 
 
 async def send_user_text_to_gemini(session, text):
-    """Gửi một câu đã được Groq STT chốt thành một turn hoàn chỉnh.
+    """Đưa câu đã được Groq chốt vào Gemini 3.1 Live.
 
-    Không gửi bằng realtime_input(text=...) ở đây: với kiến trúc external STT
-    + manual VAD, đường đó có thể để turn ở trạng thái chưa hoàn tất. Dùng
-    client-content với turn_complete=True để Gemini phát AUDIO ngay.
+    Gemini 3.1 Live không dùng send_client_content cho user message mới sau
+    khi phiên đã bắt đầu. Text realtime là đường input chính thức; gọi trực
+    tiếp send_realtime_input(text=...) để Gemini bắt đầu turn AUDIO.
     """
-    await session.send_client_content(
-        turns=types.Content(
-            role="user",
-            parts=[types.Part(text=text)],
-        ),
-        turn_complete=True,
-    )
+    await session.send_realtime_input(text=text)
 
 
 async def deliver_text_to_brain(session, text):
@@ -114,9 +108,9 @@ async def deliver_text_to_brain(session, text):
 
     try:
         await send_user_text_to_gemini(session, text)
-        print("📨 Đã gửi turn hoàn chỉnh vào Gemini.", flush=True)
+        print("📨 Đã gửi text realtime vào Gemini 3.1.", flush=True)
     except Exception as exc:
-        print("⚠️ Gửi turn text vào Gemini lỗi:", repr(exc), flush=True)
+        print("⚠️ Gửi text realtime vào Gemini lỗi:", repr(exc), flush=True)
 
 
 def _is_speech(frame: bytes) -> bool:
