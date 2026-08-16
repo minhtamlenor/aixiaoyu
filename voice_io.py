@@ -3,12 +3,6 @@
 # Tai  = Groq Whisper (free tier)
 # Não  = Gemini Live + personality + tutor/lesson flow
 # Miệng = Gemini Live native AUDIO output
-#
-# Quan trọng:
-# - Không dùng Edge TTS nữa.
-# - Gemini tự tạo giọng nói và stream PCM 24 kHz ra loa.
-# - Giữ toàn bộ não gia sư trong live_voice.py.
-# - Microphone chỉ thu -> Groq Whisper -> text -> Gemini.
 # ============================================================
 
 import asyncio
@@ -30,10 +24,7 @@ PREROLL_MS = 240
 END_SILENCE_MS = 720
 MIN_SPEECH_MS = 180
 MAX_UTTERANCE_MS = 15000
-
-# VAD RMS thuần Python, không cần webrtcvad/native compiler.
 VAD_RMS_THRESHOLD = 420
-
 STT_MODEL = "whisper-large-v3-turbo"
 STT_LANGUAGE = "vi"
 
@@ -41,19 +32,13 @@ STT_LANGUAGE = "vi"
 def _groq_client():
     key = os.environ.get("GROQ_API_KEY")
     if not key:
-        raise RuntimeError(
-            "Chưa có GROQ_API_KEY. Hãy đặt biến môi trường GROQ_API_KEY trước khi chạy."
-        )
+        raise RuntimeError("Chưa có GROQ_API_KEY. Hãy đặt biến môi trường GROQ_API_KEY trước khi chạy.")
     return Groq(api_key=key)
 
 
-# ============================================================
-# STT - TAI
-# ============================================================
 def _pcm_to_wav(pcm: bytes) -> bytes:
     import io
     import wave
-
     output = io.BytesIO()
     with wave.open(output, "wb") as wav:
         wav.setnchannels(CHANNELS)
@@ -87,9 +72,6 @@ async def transcribe(audio: bytes) -> str:
         return ""
 
 
-# ============================================================
-# ROUTING -> NÃO GIA SƯ
-# ============================================================
 async def deliver_text_to_brain(session, text):
     text = (text or "").strip()
     if not text:
@@ -107,11 +89,8 @@ async def deliver_text_to_brain(session, text):
         and brain.lesson_waiting_for_answer
     )
 
-    # Giữ nguyên command/tutor controller hiện tại.
     await brain.process_user_text(session, text)
 
-    # Chat thường phải đưa text vào Gemini để Gemini tạo AUDIO native.
-    # Các lệnh tutor/lesson đã được live_voice xử lý thì không gửi lần hai.
     if handled_by_controller or lesson_answer:
         return
 
@@ -121,9 +100,6 @@ async def deliver_text_to_brain(session, text):
         print("⚠️ Gửi text vào Gemini lỗi:", repr(exc), flush=True)
 
 
-# ============================================================
-# MICROPHONE SEGMENTER
-# ============================================================
 def _is_speech(frame: bytes) -> bool:
     if not frame:
         return False
@@ -189,8 +165,10 @@ async def microphone_loop(audio_queue):
         while not brain.shutdown_requested:
             frame = await audio_queue.get()
 
-            # Gemini native AUDIO đang phát -> khóa mic để không thu ngược giọng.
-            if brain.model_speaking or not brain.listen_ready:
+            # Chỉ khóa mic khi Gemini thực sự đang phát tiếng.
+            # Không dùng listen_ready ở đây vì state này thuộc transport cũ
+            # và có thể còn False dù microphone đã sẵn sàng.
+            if brain.model_speaking:
                 preroll.clear()
                 speech.clear()
                 speech_started = False
@@ -229,15 +207,13 @@ async def microphone_loop(audio_queue):
                 print("🔴 MIC: kết thúc câu", flush=True)
 
 
-# ============================================================
-# MAIN VOICE LOOP
-# ============================================================
 async def start_voice_io():
-    # Kiểm tra tai trước khi mở Gemini.
     _groq_client()
 
     brain.shutdown_requested = False
-    brain.listen_ready = False
+    # voice_io tự quản lý việc mở microphone; không để state listen_ready
+    # của transport cũ chặn tai mới.
+    brain.listen_ready = True
     brain.model_speaking = False
     brain.startup_greeting_sent = False
 
@@ -262,8 +238,6 @@ async def start_voice_io():
                 print("👤 Lão sư:", text, flush=True)
                 await deliver_text_to_brain(session, text)
 
-        # Dùng lại receive_loop của live_voice.py vì đây chính là đường
-        # Gemini native AUDIO đã được kiểm chứng: model_turn -> PCM -> speaker.
         receive_task = asyncio.create_task(brain.receive_loop(session))
         mic_task = asyncio.create_task(audio_worker())
 
