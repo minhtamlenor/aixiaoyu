@@ -151,8 +151,9 @@ async def microphone_loop(audio_queue):
             frame = await audio_queue.get()
 
             # Chỉ thu khi hệ thống đang ở trạng thái chờ input của Lão sư.
-            # Sau khi gửi transcript, listen_ready=False sẽ khóa microphone
-            # cho tới khi Gemini hoàn tất lượt trả lời.
+            # listen_ready chỉ được receive_loop bật lại sau khi Tiểu Vũ
+            # hoàn tất lượt nói của chính mình. Điều này đặc biệt quan trọng
+            # ở startup: microphone không được bắt giọng loa của lời chào.
             if not brain.listen_ready or brain.model_speaking:
                 preroll.clear()
                 speech.clear()
@@ -198,7 +199,10 @@ async def start_voice_io():
     _groq_client()
 
     brain.shutdown_requested = False
-    brain.listen_ready = True
+    # Không mở tai ngay khi vừa kết nối. Startup greeting của Tiểu Vũ phải
+    # được phát xong trước; receive_loop sẽ đặt listen_ready=True khi nhận
+    # turn_complete. Nếu mở quá sớm, MIC có thể thu chính giọng của Tiểu Vũ.
+    brain.listen_ready = False
     brain.model_speaking = False
     brain.startup_greeting_sent = False
 
