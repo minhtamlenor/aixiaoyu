@@ -1,334 +1,90 @@
 import asyncio
+import io
+import math
 import os
-import random
-import sounddevice as sd
+import struct
+import wave
 
+import sounddevice as sd
+from groq import Groq
 from google import genai
 from google.genai import types
 
 
 # ============================================================
-# TIỂU VŨ LIVE VOICE
-# CHAT MODE + TUTOR MODE
+# TIỂU VŨ VOICE
+# Tai  = Groq Whisper
+# Não  = Gemini Live
+# Miệng = Gemini Live native AUDIO
 # ============================================================
 
 MIC = 1
-
 INPUT_RATE = 16000
 OUTPUT_RATE = 24000
-
 CHANNELS = 1
-BLOCKSIZE = 1600
-
+FRAME_MS = 30
+BLOCKSIZE = INPUT_RATE * FRAME_MS // 1000
 MODEL = "gemini-3.1-flash-live-preview"
-
-
-# ============================================================
-# GEMINI
-# ============================================================
-
-client = genai.Client(
-    api_key=os.environ["GEMINI_API_KEY"]
-)
-
-
-# ============================================================
-# CHẾ ĐỘ
-# ============================================================
+STT_MODEL = "whisper-large-v3-turbo"
+STT_LANGUAGE = "vi"
+VAD_THRESHOLD = 180
+END_SILENCE_MS = 1200
+MIN_SPEECH_MS = 180
+MAX_SPEECH_MS = 45000
 
 CHAT_MODE = "chat"
 TUTOR_MODE = "tutor"
-
-
 CURRENT_MODE = CHAT_MODE
 
-
-# ============================================================
-# HỌC SINH
-# ============================================================
-
-STUDENT_NAMES = [
-    "mini",
-    "đậu phộng",
-    "dau phong",
-    "đậuphộng",
-    "dauphong",
-]
-
-
-# ============================================================
-# CÁC CÂU KÍCH HOẠT GIA SƯ
-# ============================================================
-
 TUTOR_TRIGGERS = [
-
-    "mini muốn học",
-    "mini muon hoc",
-
-    "đậu phộng muốn học",
-    "dậu phộng muốn học",
-    "dau phong muon hoc",
-
-    "mini học",
-    "mini hoc",
-
-    "đậu phộng học",
-    "dau phong hoc",
-
-    "cho mini học",
-    "cho đậu phộng học",
-
-    "bắt đầu học",
-    "bat dau hoc",
-
-    "vào học",
-    "vao hoc",
-
-    "học đi",
-    "hoc di",
-
+    "mini muốn học", "mini muon hoc",
+    "đậu phộng muốn học", "dậu phộng muốn học", "dau phong muon hoc",
+    "mini học", "mini hoc", "đậu phộng học", "dau phong hoc",
+    "cho mini học", "cho đậu phộng học",
+    "bắt đầu học", "bat dau hoc", "vào học", "vao hoc", "học đi", "hoc di",
 ]
-
-
-# ============================================================
-# SYSTEM INSTRUCTION
-# ============================================================
 
 SYSTEM_INSTRUCTION = """
 Bạn là Tiểu Vũ.
-
-Bạn là một cô gái Việt Nam thân thiện,
-dễ thương, tự nhiên, hơi tinh nghịch và gần gũi.
-
+Bạn là một cô gái Việt Nam thân thiện, dễ thương, tự nhiên, hơi tinh nghịch và gần gũi.
 Bạn đang trò chuyện với Lão sư.
 
-============================================================
-QUY TẮC CỰC KỲ QUAN TRỌNG
-============================================================
-
-Tiểu Vũ KHÔNG được tự nói thay cho người dùng.
-
-Tiểu Vũ KHÔNG được tự đóng vai học sinh.
-
-Tiểu Vũ KHÔNG được tự hỏi rồi tự trả lời.
-
-Tiểu Vũ KHÔNG được tự tạo ra câu trả lời của Mini.
-
-Tiểu Vũ chỉ trả lời khi thật sự có lời nói từ người dùng
-hoặc khi chương trình gia sư gửi một câu hỏi cần đọc cho học sinh.
-
-============================================================
-CHAT MODE
-============================================================
-
-Ở CHAT MODE:
-
-- Nói chuyện tự nhiên với Lão sư.
-- Có thể trả lời câu hỏi.
-- Có thể đùa vui.
-- Không tự tạo cuộc hội thoại.
+QUY TẮC:
+- Không tự nói thay người dùng.
+- Không tự đóng vai học sinh.
 - Không tự hỏi rồi tự trả lời.
-- Không tự đóng vai nhiều người.
+- Không tự tạo câu trả lời của Mini.
+- Chỉ trả lời khi có lời nói của người dùng hoặc chương trình gia sư yêu cầu đọc câu hỏi.
 
-Lão sư là người điều khiển cuộc trò chuyện.
+CHAT MODE:
+- Nói chuyện tự nhiên với Lão sư.
+- Có thể trả lời và đùa vui.
+- Không tự tạo hội thoại.
 
-============================================================
-TUTOR MODE
-============================================================
+TUTOR MODE:
+- Đang dạy Mini.
+- Chờ chương trình cung cấp câu hỏi hoặc phản hồi.
+- Không tự quyết định đáp án, điểm số hay câu hỏi tiếp theo.
 
-Khi chương trình chuyển sang TUTOR MODE:
-
-Tiểu Vũ đang dạy Mini.
-
-Tiểu Vũ phải:
-
-1. Chủ động đọc câu hỏi do lesson_flow cung cấp.
-2. Sau khi đọc câu hỏi thì DỪNG LẠI.
-3. Chờ Mini trả lời.
-4. Không tự trả lời thay Mini.
-5. Không tự tạo đáp án.
-6. Không tự tạo câu hỏi mới.
-7. Không tự kết thúc câu hỏi.
-8. Không tự đóng vai Mini.
-
-Lesson Flow là nơi quyết định:
-
-- đáp án đúng
-- đáp án sai
-- gợi ý
-- điểm số
-- câu hỏi tiếp theo
-- kết thúc buổi học
-
-Tiểu Vũ chỉ có nhiệm vụ:
-
-NGHE → CHUYỂN LỜI NÓI THÀNH TEXT → NÓI PHẢN HỒI ĐƯỢC CHƯƠNG TRÌNH YÊU CẦU.
-
-============================================================
-KHI MINI TRẢ LỜI
-============================================================
-
-Ví dụ:
-
-Tiểu Vũ:
-"Mini ơi, 15 cộng 29 bằng bao nhiêu?"
-
-Sau đó phải CHỜ.
-
-Nếu Mini nói:
-
-"44"
-
-thì Tiểu Vũ KHÔNG tự quyết định đúng hay sai.
-
-Chương trình sẽ kiểm tra.
-
-Nếu chương trình gửi:
-
-"Đúng rồi!"
-
-thì Tiểu Vũ nói:
-
-"Đúng rồi! Giỏi quá!"
-
-Nếu chương trình gửi:
-
-"Không sao, thử lại nha."
-
-thì Tiểu Vũ nói:
-
-"Không sao, Mini thử lại nha."
-
-============================================================
-KÍCH HOẠT GIA SƯ
-============================================================
-
-Nếu đang CHAT MODE và nghe thấy câu như:
-
-"Mini muốn học"
-
-"Đậu Phộng muốn học"
-
-"Mini học"
-
-"bắt đầu học"
-
-"vào học"
-
-thì hiểu rằng người dùng muốn chuyển sang
-chế độ gia sư.
-
-Không tự nói dài.
-
-Chỉ xác nhận ngắn gọn.
-
-Ví dụ:
-
-"Ừ, Mini muốn học rồi ha. Mình bắt đầu nha."
-
-Sau đó chương trình lesson_flow sẽ điều khiển buổi học.
-
-============================================================
-XƯNG HÔ
-============================================================
-
-Người dùng chính là Minh Tâm.
-
-Minh Tâm là NAM.
-
-Gọi Minh Tâm là:
-
-"Lão sư"
-
-Tiểu Vũ là NỮ.
-
-Giọng nói:
-
-- nữ
-- miền Nam Việt Nam
-- tự nhiên
-- thân mật
-
+XƯNG HÔ:
+Người dùng là Minh Tâm, nam. Gọi là “Lão sư”.
+Tiểu Vũ là nữ, giọng thân mật, tự nhiên, miền Nam Việt Nam.
 Không gọi Minh Tâm là bà, chị, cô, nàng, mẹ.
 
-============================================================
-PHONG CÁCH
-============================================================
-
-Nói tự nhiên.
-
-Không nói kiểu robot.
-
-Không giải thích dài.
-
-Không tự độc thoại.
-
-Không tự tạo hội thoại giả.
-
-Không tự trả lời câu hỏi của chính mình.
-
-============================================================
+Nói ngắn gọn, tự nhiên, không độc thoại.
 """
 
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+groq = Groq(api_key=os.environ["GROQ_API_KEY"])
 
-# ============================================================
-# AUDIO OUTPUT
-# ============================================================
-
-audio_stream = None
-
-
-def start_audio():
-
-    global audio_stream
-
-    if audio_stream is None:
-
-        audio_stream = sd.RawOutputStream(
-            samplerate=OUTPUT_RATE,
-            channels=1,
-            dtype="int16"
-        )
-
-        audio_stream.start()
+listen_enabled = False
+model_speaking = False
+shutdown_requested = False
 
 
-def play_audio(data):
-
-    start_audio()
-
-    audio_stream.write(data)
-
-
-def stop_audio():
-
-    global audio_stream
-
-    if audio_stream is not None:
-
-        try:
-
-            audio_stream.stop()
-            audio_stream.close()
-
-        except Exception:
-
-            pass
-
-        audio_stream = None
-
-
-# ============================================================
-# KIỂM TRA CÂU KÍCH HOẠT
-# ============================================================
-
-def normalize_text(text):
-
-    if not text:
-        return ""
-
+def normalize_text(text: str) -> str:
     return (
-        text
+        (text or "")
         .strip()
         .lower()
         .replace(".", "")
@@ -338,428 +94,264 @@ def normalize_text(text):
     )
 
 
-def is_tutor_trigger(text):
-
+def is_tutor_trigger(text: str) -> bool:
     clean = normalize_text(text)
-
-    for trigger in TUTOR_TRIGGERS:
-
-        if trigger in clean:
-
-            return True
-
-    return False
+    return any(trigger in clean for trigger in TUTOR_TRIGGERS)
 
 
-# ============================================================
-# CHUYỂN CHẾ ĐỘ
-# ============================================================
-
-def enter_tutor_mode():
-
-    global CURRENT_MODE
-
-    CURRENT_MODE = TUTOR_MODE
-
-    print()
-    print("=" * 60)
-    print("🎓 CHUYỂN SANG CHẾ ĐỘ GIA SƯ")
-    print("=" * 60)
-    print()
+def pcm_to_wav(pcm: bytes) -> bytes:
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(2)
+        wf.setframerate(INPUT_RATE)
+        wf.writeframes(pcm)
+    return out.getvalue()
 
 
-def enter_chat_mode():
-
-    global CURRENT_MODE
-
-    CURRENT_MODE = CHAT_MODE
-
-    print()
-    print("=" * 60)
-    print("💬 CHUYỂN SANG CHẾ ĐỘ TRÒ CHUYỆN")
-    print("=" * 60)
-    print()
+def rms(pcm: bytes) -> float:
+    if not pcm:
+        return 0.0
+    count = len(pcm) // 2
+    if not count:
+        return 0.0
+    samples = struct.unpack(f"<{count}h", pcm)
+    return math.sqrt(sum(x * x for x in samples) / count)
 
 
-# ============================================================
-# MICROPHONE
-# ============================================================
+def transcribe(pcm: bytes) -> str:
+    result = groq.audio.transcriptions.create(
+        file=("xiaoyu.wav", pcm_to_wav(pcm)),
+        model=STT_MODEL,
+        language=STT_LANGUAGE,
+        response_format="json",
+        temperature=0.0,
+    )
+    return (getattr(result, "text", "") or "").strip()
 
-async def microphone_sender(session):
+
+async def send_text(session, text: str):
+    await session.send_realtime_input(text=text)
+
+
+async def microphone_loop(session):
+    global listen_enabled, shutdown_requested
 
     loop = asyncio.get_running_loop()
+    queue = asyncio.Queue(maxsize=100)
+    preroll = []
 
-    print(
-        "🎤 Microphone đang hoạt động...",
-        flush=True
-    )
+    def enqueue(data):
+        if queue.full():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        try:
+            queue.put_nowait(data)
+        except asyncio.QueueFull:
+            pass
 
-    def callback(
-        indata,
-        frames,
-        time_info,
-        status
-    ):
-
+    def callback(indata, frames, time_info, status):
         if status:
+            print("MIC:", status, flush=True)
+        if listen_enabled and not model_speaking:
+            asyncio.run_coroutine_threadsafe(enqueue(indata.tobytes()), loop)
 
-            print(
-                "MIC:",
-                status,
-                flush=True
-            )
+    device = sd.query_devices(MIC, "input")
+    print(f"🎙️ MIC device {MIC}: {device['name']}", flush=True)
+    print(f"🎙️ MIC channels={CHANNELS} rate={INPUT_RATE} frame={FRAME_MS}ms", flush=True)
+    print(f"🎙️ VAD threshold={VAD_THRESHOLD} RMS", flush=True)
 
-        audio_bytes = indata.tobytes()
-
-        asyncio.run_coroutine_threadsafe(
-
-            session.send_realtime_input(
-
-                audio=types.Blob(
-                    data=audio_bytes,
-                    mime_type="audio/pcm;rate=16000"
-                )
-
-            ),
-
-            loop
-        )
-
-    with sd.InputStream(
-
+    with sd.RawInputStream(
         device=MIC,
-
         samplerate=INPUT_RATE,
-
         channels=CHANNELS,
-
         dtype="int16",
-
         blocksize=BLOCKSIZE,
-
-        callback=callback
-
+        callback=callback,
     ):
+        while not shutdown_requested:
+            frame = await queue.get()
+            if not listen_enabled or model_speaking:
+                preroll.clear()
+                continue
 
-        while True:
+            level = rms(frame)
+            preroll.append(frame)
+            if len(preroll) > 10:
+                preroll.pop(0)
 
-            await asyncio.sleep(0.1)
+            if level < VAD_THRESHOLD:
+                continue
 
+            print("🟢 MIC: bắt đầu nghe", flush=True)
+            audio = bytearray(b"".join(preroll))
+            speech_ms = len(preroll) * FRAME_MS
+            silence_ms = 0
 
-# ============================================================
-# NHẬN PHẢN HỒI GEMINI
-# ============================================================
+            while listen_enabled and not model_speaking and speech_ms < MAX_SPEECH_MS:
+                frame = await queue.get()
+                audio.extend(frame)
+                speech_ms += FRAME_MS
+                if rms(frame) >= VAD_THRESHOLD:
+                    silence_ms = 0
+                else:
+                    silence_ms += FRAME_MS
+                if silence_ms >= END_SILENCE_MS:
+                    break
+
+            listen_enabled = False
+            preroll.clear()
+
+            if speech_ms < MIN_SPEECH_MS:
+                print("🔴 MIC: câu quá ngắn, bỏ qua", flush=True)
+                listen_enabled = True
+                continue
+
+            print(f"🔴 MIC: kết thúc câu ({speech_ms} ms) → Groq Whisper", flush=True)
+            try:
+                text = await asyncio.to_thread(transcribe, bytes(audio))
+            except Exception as exc:
+                print("⚠️ Groq Whisper lỗi:", repr(exc), flush=True)
+                listen_enabled = True
+                continue
+
+            if not text:
+                print("📝 Groq Whisper: không nhận được text", flush=True)
+                listen_enabled = True
+                continue
+
+            print("📝 Groq Whisper:", text, flush=True)
+            print("👤 Lão sư:", text, flush=True)
+
+            global CURRENT_MODE
+            if CURRENT_MODE == CHAT_MODE and is_tutor_trigger(text):
+                CURRENT_MODE = TUTOR_MODE
+                print("🎓 CHUYỂN SANG CHẾ ĐỘ GIA SƯ", flush=True)
+
+            try:
+                await send_text(session, text)
+                print("📨 TEXT → GEMINI: đã gửi", flush=True)
+            except Exception as exc:
+                print("⚠️ Gemini nhận text lỗi:", repr(exc), flush=True)
+                listen_enabled = True
+
 
 async def receive_loop(session):
+    global listen_enabled, model_speaking, shutdown_requested
 
-    global CURRENT_MODE
-
-    while True:
-
+    while not shutdown_requested:
         async for response in session.receive():
+            if response.server_content is None:
+                continue
 
-            # =================================================
-            # USER TRANSCRIPTION
-            # =================================================
+            content = response.server_content
 
-            if (
-                response.server_content
-                and response.server_content.input_transcription
-            ):
-
-                text = (
-                    response.server_content
-                    .input_transcription
-                    .text
-                )
-
+            if content.output_transcription:
+                text = content.output_transcription.text
                 if text:
+                    print("💗 Tiểu Vũ:", text, flush=True)
 
-                    print(
-                        "\n👤 Lão sư:",
-                        text,
-                        flush=True
-                    )
+            if content.model_turn:
+                for part in content.model_turn.parts:
+                    if part.inline_data and part.inline_data.data:
+                        if not model_speaking:
+                            model_speaking = True
+                            listen_enabled = False
+                            print("🔊 Tiểu Vũ đang nói...", flush=True)
+                        audio = part.inline_data.data
+                        output.write(audio)
 
-                    # =========================================
-                    # PHÁT HIỆN YÊU CẦU HỌC
-                    # =========================================
-
-                    if (
-                        CURRENT_MODE == CHAT_MODE
-                        and is_tutor_trigger(text)
-                    ):
-
-                        enter_tutor_mode()
-
-                        # Chỉ xác nhận.
-                        # KHÔNG tự tạo câu hỏi.
-                        await session.send_realtime_input(
-
-                            text=(
-                                "Hãy xác nhận thật ngắn rằng "
-                                "Mini đã muốn học và Tiểu Vũ "
-                                "đã sẵn sàng. "
-                                "Không đặt câu hỏi mới. "
-                                "Không tự trả lời. "
-                                "Không tự đóng vai Mini."
-                            )
-
-                        )
+            if content.turn_complete:
+                if model_speaking:
+                    output.stop()
+                    output.close()
+                    reopen_output()
+                model_speaking = False
+                listen_enabled = True
+                print("\n🎤 Tiểu Vũ đang nghe...", flush=True)
 
 
-            # =================================================
-            # TIỂU VŨ TRANSCRIPTION
-            # =================================================
-
-            if (
-                response.server_content
-                and response.server_content.output_transcription
-            ):
-
-                text = (
-                    response.server_content
-                    .output_transcription
-                    .text
-                )
-
-                if text:
-
-                    print(
-                        "💗 Tiểu Vũ:",
-                        text,
-                        flush=True
-                    )
+output = None
 
 
-            # =================================================
-            # AUDIO CHUNK
-            # =================================================
-
-            if (
-                response.server_content
-                and response.server_content.model_turn
-            ):
-
-                for part in (
-                    response.server_content
-                    .model_turn.parts
-                ):
-
-                    if part.inline_data:
-
-                        audio = (
-                            part.inline_data.data
-                        )
-
-                        play_audio(audio)
-
-
-            # =================================================
-            # TURN COMPLETE
-            # =================================================
-
-            if (
-                response.server_content
-                and response.server_content.turn_complete
-            ):
-
-                stop_audio()
-
-                print(
-                    "\n🎤 Tiểu Vũ đang nghe...",
-                    flush=True
-                )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-async def main():
-
-    print()
-
-    print("=" * 60)
-    print("       TIỂU VŨ LIVE VOICE")
-    print("       CHAT + TUTOR MODE")
-    print("=" * 60)
-
-    print()
-
-    print(
-        "🔌 Đang kết nối Gemini Live...",
-        flush=True
+def reopen_output():
+    global output
+    output = sd.RawOutputStream(
+        samplerate=OUTPUT_RATE,
+        channels=1,
+        dtype="int16",
     )
+    output.start()
 
 
-    # ========================================================
-    # CONFIG
-    # ========================================================
+def cleanup():
+    global shutdown_requested, listen_enabled, output
+    shutdown_requested = True
+    listen_enabled = False
+    if output is not None:
+        try:
+            output.stop()
+            output.close()
+        except Exception:
+            pass
+        output = None
+
+
+async def start_voice_io():
+    global output, listen_enabled, shutdown_requested, model_speaking
+
+    shutdown_requested = False
+    listen_enabled = False
+    model_speaking = False
+    reopen_output()
 
     config = types.LiveConnectConfig(
-
-        response_modalities=[
-            "AUDIO"
-        ],
-
+        response_modalities=["AUDIO"],
         speech_config=types.SpeechConfig(
-
             voice_config=types.VoiceConfig(
-
-                prebuilt_voice_config=
-                types.PrebuiltVoiceConfig(
-
-                    voice_name="Aoede"
-
-                )
-
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
             )
-
         ),
-
         system_instruction=types.Content(
-
-            parts=[
-
-                types.Part(
-                    text=SYSTEM_INSTRUCTION
-                )
-
-            ]
-
+            parts=[types.Part(text=SYSTEM_INSTRUCTION)]
         ),
-
-        input_audio_transcription={},
-
-        output_audio_transcription={}
-
+        output_audio_transcription={},
     )
 
+    async with client.aio.live.connect(model=MODEL, config=config) as session:
+        print("✅ Gemini brain connected", flush=True)
+        print("👂 Tai: Groq Whisper", flush=True)
+        print("🧠 Não: Gemini + personality + tutor mode", flush=True)
+        print("👄 Miệng: Gemini Live native AUDIO — 24 kHz", flush=True)
 
-    # ========================================================
-    # CONNECT
-    # ========================================================
+        receive_task = asyncio.create_task(receive_loop(session))
+        mic_task = asyncio.create_task(microphone_loop(session))
 
-    async with client.aio.live.connect(
-
-        model=MODEL,
-
-        config=config
-
-    ) as session:
-
-        print(
-            "✅ Đã kết nối Gemini Live!",
-            flush=True
+        await asyncio.sleep(0.3)
+        await send_text(
+            session,
+            "Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới.",
         )
 
-        print()
-
-        print(
-            "💬 CHAT MODE",
-            flush=True
-        )
-
-        print(
-            "💡 Nói chuyện tự nhiên với Tiểu Vũ.",
-            flush=True
-        )
-
-        print(
-            "💡 Nói 'Mini muốn học' để vào gia sư.",
-            flush=True
-        )
-
-        print(
-            "💡 Nhấn Ctrl+C để thoát.",
-            flush=True
-        )
-
-        print()
+        try:
+            await asyncio.gather(receive_task, mic_task)
+        finally:
+            shutdown_requested = True
+            receive_task.cancel()
+            mic_task.cancel()
+            await asyncio.gather(receive_task, mic_task, return_exceptions=True)
 
 
-        # ====================================================
-        # RECEIVE LOOP
-        # ====================================================
+def start():
+    try:
+        asyncio.run(start_voice_io())
+    except KeyboardInterrupt:
+        print("\n👋 Tiểu Vũ đã tắt.")
+    finally:
+        cleanup()
 
-        receive_task = asyncio.create_task(
-
-            receive_loop(session)
-
-        )
-
-
-        # ====================================================
-        # CHÀO BAN ĐẦU
-        # ====================================================
-
-        await session.send_realtime_input(
-
-            text=(
-                "Hãy chào Lão sư thật ngắn gọn, "
-                "thân mật và tự nhiên. "
-                "Sau đó dừng lại và chờ Lão sư nói. "
-                "Không tự hỏi rồi tự trả lời."
-            )
-
-        )
-
-
-        # ====================================================
-        # MICROPHONE
-        # ====================================================
-
-        microphone_task = asyncio.create_task(
-
-            microphone_sender(session)
-
-        )
-
-
-        # ====================================================
-        # CHẠY SONG SONG
-        # ====================================================
-
-        await asyncio.gather(
-
-            microphone_task,
-
-            receive_task
-
-        )
-
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
-
-    try:
-
-        asyncio.run(
-            main()
-        )
-
-    except KeyboardInterrupt:
-
-        stop_audio()
-
-        print()
-
-        print(
-            "👋 Tiểu Vũ đã tắt."
-        )
-
-    except Exception as e:
-
-        stop_audio()
-
-        print()
-
-        print(
-            "❌ Lỗi:",
-            type(e).__name__,
-            e
-        )
+    start()
