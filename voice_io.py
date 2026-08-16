@@ -32,8 +32,9 @@ VAD_RMS_THRESHOLD = 420
 
 STT_MODEL = "whisper-large-v3-turbo"
 STT_LANGUAGE = "vi"
+# Tiểu Vũ: nữ miền Nam, thân thiện. Giảm nhẹ tốc độ để câu nói mềm và tự nhiên hơn.
 TTS_VOICE = "vi-VN-HoaiMyNeural"
-TTS_RATE = "+0%"
+TTS_RATE = "-5%"
 
 
 def _groq_client():
@@ -311,7 +312,8 @@ async def receive_brain(session, tts_queue):
                     print("💗 Tiểu Vũ:", chunk, flush=True)
                     output_text.append(chunk)
 
-            # Bỏ qua inline_data của Gemini: đây là phần miệng mới.
+            # Chờ Gemini hoàn tất toàn bộ lượt trả lời rồi mới đưa MỘT khối text
+            # sang TTS. Nhờ vậy Hoài My đọc liền mạch thay vì đọc từng chunk.
             if getattr(server, "turn_complete", False):
                 final_text = " ".join(output_text).strip()
                 output_text.clear()
@@ -350,7 +352,7 @@ async def start_voice_io():
         print("✅ Gemini brain connected", flush=True)
         print("👂 Tai: Groq Whisper", flush=True)
         print("🧠 Não: Gemini + personality + tutor/lesson flow", flush=True)
-        print("👄 Miệng: Edge Neural TTS — vi-VN-HoaiMyNeural", flush=True)
+        print("👄 Miệng: Edge Neural TTS — vi-VN-HoaiMyNeural (-5%)", flush=True)
 
         audio_queue = asyncio.Queue(maxsize=120)
         tts_queue = asyncio.Queue(maxsize=8)
