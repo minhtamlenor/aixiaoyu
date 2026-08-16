@@ -13,7 +13,6 @@ from collections import deque
 
 import sounddevice as sd
 from groq import Groq
-from google.genai import types
 
 import live_voice as brain
 
@@ -74,15 +73,17 @@ async def transcribe(audio: bytes) -> str:
 
 
 async def send_user_text_to_gemini(session, text):
-    """Gửi một câu người dùng đã được Groq chốt thành một turn hoàn chỉnh.
+    """Đưa transcript Groq vào Gemini Live như một user turn.
 
-    live_voice.py chủ động tắt automatic VAD vì microphone của hệ thống này
-    do voice_io.py điều khiển. Vì vậy text input cũng phải có activity_start
-    và activity_end; chỉ gửi text đơn lẻ sẽ không chốt turn để Gemini trả lời.
+    QUAN TRỌNG:
+    - Groq là tai duy nhất.
+    - Microphone KHÔNG gửi PCM vào Gemini.
+    - Gemini 3.1 Flash Live nhận transcript qua send_realtime_input(text=...).
+    - Không bọc text bằng activity_start/activity_end: các tín hiệu đó dành
+      cho luồng audio khi custom VAD điều khiển activity. Text đã là một
+      input hoàn chỉnh và API sẽ dùng nó để bắt đầu model turn.
     """
-    await session.send_realtime_input(activity_start=types.ActivityStart())
     await session.send_realtime_input(text=text)
-    await session.send_realtime_input(activity_end=types.ActivityEnd())
 
 
 def _is_speech(frame: bytes) -> bool:
@@ -100,6 +101,11 @@ def _is_speech(frame: bytes) -> bool:
 
 
 async def microphone_loop(audio_queue):
+    """Thu một utterance cục bộ để Groq Whisper xử lý.
+
+    Không gửi audio vào Gemini. Đây là điểm tách cứng giữa TAI và NÃO:
+    microphone -> local VAD -> WAV -> Groq Whisper -> text -> Gemini.
+    """
     loop = asyncio.get_running_loop()
     preroll = deque(maxlen=max(1, PREROLL_MS // FRAME_MS))
 
@@ -150,6 +156,7 @@ async def microphone_loop(audio_queue):
         while not brain.shutdown_requested:
             frame = await audio_queue.get()
 
+            # Không thu lời của chính Tiểu Vũ.
             if brain.model_speaking:
                 preroll.clear()
                 speech.clear()
@@ -217,9 +224,8 @@ async def start_voice_io():
                     continue
                 print("👤 Lão sư:", text, flush=True)
 
-                # Giữ nguyên toàn bộ command/tutor/personality logic hiện có.
-                # process_user_text chỉ xử lý điều khiển mode; câu chat thật
-                # phải được gửi tiếp vào Gemini như một user turn hoàn chỉnh.
+                # process_user_text giữ nguyên toàn bộ command/tutor/lesson flow.
+                # Chỉ chat bình thường mới cần gửi text trực tiếp vào Gemini.
                 if brain.detect_farewell(text):
                     await brain.process_user_text(session, text)
                     continue
@@ -239,7 +245,7 @@ async def start_voice_io():
 
                 try:
                     await send_user_text_to_gemini(session, text)
-                    print("📨 TEXT → GEMINI: turn hoàn chỉnh", flush=True)
+                    print("📨 TEXT → GEMINI: đã gửi transcript", flush=True)
                 except Exception as exc:
                     print("⚠️ TEXT → GEMINI lỗi:", repr(exc), flush=True)
 
