@@ -22,10 +22,8 @@ CHANNELS = 1
 FRAME_MS = 30
 FRAME_BYTES = SAMPLE_RATE * FRAME_MS // 1000 * 2
 PREROLL_MS = 300
-# Cho phép khoảng ngắt tự nhiên dài hơn trước khi kết thúc một câu.
 END_SILENCE_MS = 1400
 MIN_SPEECH_MS = 180
-# Cho phép một lượt nói dài tới 45 giây, không cắt ở 15 giây như bản trước.
 MAX_UTTERANCE_MS = 45000
 VAD_RMS_THRESHOLD = 420
 STT_MODEL = "whisper-large-v3-turbo"
@@ -76,12 +74,7 @@ async def transcribe(audio: bytes) -> str:
 
 
 async def send_user_text_to_gemini(session, text):
-    """Đưa transcript Groq vào Gemini Live như một user turn hoàn chỉnh.
-
-    Groq là TAI duy nhất. Microphone không gửi PCM vào Gemini.
-    Transcript được gửi như client content với turn_complete=True để Gemini
-    tạo một model turn mới và trả AUDIO native như bình thường.
-    """
+    """Đưa transcript Groq vào Gemini Live như một user turn hoàn chỉnh."""
     await session.send_client_content(
         turns=types.Content(
             role="user",
@@ -106,11 +99,7 @@ def _is_speech(frame: bytes) -> bool:
 
 
 async def microphone_loop(audio_queue):
-    """Thu một utterance cục bộ để Groq Whisper xử lý.
-
-    Microphone -> local VAD -> WAV -> Groq Whisper -> text -> Gemini.
-    Không gửi PCM microphone vào Gemini.
-    """
+    """Microphone -> local VAD -> WAV -> Groq Whisper -> text -> Gemini."""
     loop = asyncio.get_running_loop()
     preroll = deque(maxlen=max(1, PREROLL_MS // FRAME_MS))
 
@@ -161,7 +150,10 @@ async def microphone_loop(audio_queue):
         while not brain.shutdown_requested:
             frame = await audio_queue.get()
 
-            if brain.model_speaking:
+            # Chỉ thu khi hệ thống đang ở trạng thái chờ input của Lão sư.
+            # Sau khi gửi transcript, listen_ready=False sẽ khóa microphone
+            # cho tới khi Gemini hoàn tất lượt trả lời.
+            if not brain.listen_ready or brain.model_speaking:
                 preroll.clear()
                 speech.clear()
                 speech_started = False
@@ -189,6 +181,8 @@ async def microphone_loop(audio_queue):
             else:
                 silence_ms += FRAME_MS
 
+            # Kết thúc sau 1.4 giây im lặng hoặc 45 giây liên tục.
+            # Câu dài được giữ nguyên thành một transcript duy nhất.
             if silence_ms >= END_SILENCE_MS or speech_ms >= MAX_UTTERANCE_MS:
                 if speech_ms >= MIN_SPEECH_MS:
                     yield bytes(speech)
