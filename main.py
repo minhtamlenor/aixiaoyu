@@ -212,7 +212,32 @@ async def _process_user_text_with_memory(session, text):
     await _original_process_user_text(session, text)
 
 
+# ------------------------------------------------------------
+# STARTUP GREETING GUARD
+# ------------------------------------------------------------
+# voice.py vẫn là voice baseline. Chỉ chặn đúng câu lệnh startup cũ
+# và thay bằng lời nhắc đầy đủ để Gemini nói:
+#   1. "Chào Lão sư!"
+#   2. hỏi thăm Lão sư
+#   3. giữ CHAT MODE và chờ Lão sư
+# Không ảnh hưởng các lượt nói khác.
+_original_send_text = voice.send_text
+
+
+async def _send_text_with_startup_guard(session, text):
+    if text.strip() == "Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới.":
+        text = (
+            "Tiểu Vũ vừa được kích hoạt và đang ở CHAT MODE với Lão sư Minh Tâm. "
+            "Câu đầu tiên BẮT BUỘC phải nói chính xác: Chào Lão sư! "
+            "Ngay sau đó hỏi thăm Lão sư một câu ngắn, tự nhiên và thân thiện, ví dụ hỏi Lão sư hôm nay khỏe không. "
+            "Không hỏi bài học, không gọi học sinh, không chuyển sang Tutor Mode. "
+            "Sau lời chào và hỏi thăm thì dừng lại, chờ Lão sư nói tiếp."
+        )
+    await _original_send_text(session, text)
+
+
 voice.process_user_text = _process_user_text_with_memory
+voice.send_text = _send_text_with_startup_guard
 
 
 if __name__ == "__main__":
