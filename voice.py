@@ -2,7 +2,6 @@ import asyncio
 import io
 import math
 import os
-import random
 import re
 import struct
 import unicodedata
@@ -21,10 +20,8 @@ from tools.calendar_tool import get_calendar_text
 
 # ============================================================
 # TIỂU VŨ - VOICE RUNTIME
-# Âm thanh có thể thay đổi; phần NÃO/GIA SƯ/TOOLS được giữ ổn định.
-# Tai  = Groq Whisper
-# Não  = Gemini Live + personality + tutor mode
-# Miệng = Gemini Live native AUDIO
+# Giữ nguyên NÃO / PERSONALITY / TUTOR / TOOLS.
+# Phần microphone chỉ được tối ưu để cắt câu nhanh và sạch hơn.
 # ============================================================
 
 MIC = 1
@@ -36,14 +33,19 @@ BLOCKSIZE = INPUT_RATE * FRAME_MS // 1000
 MODEL = "gemini-3.1-flash-live-preview"
 STT_MODEL = "whisper-large-v3-turbo"
 STT_LANGUAGE = "vi"
-VAD_THRESHOLD = 180
-END_SILENCE_MS = 1200
-MIN_SPEECH_MS = 180
-MAX_SPEECH_MS = 45000
+
+# VAD: bắt đầu nghe khi âm lượng thực sự vượt ngưỡng,
+# kết thúc nhanh hơn sau khi người nói ngừng.
+VAD_THRESHOLD = 240
+END_SILENCE_MS = 600
+PREROLL_FRAMES = 5
+MIN_SPEECH_MS = 300
+MAX_SPEECH_MS = 30000
 
 CHAT_MODE = "chat"
 TUTOR_MODE = "tutor"
 current_mode = CHAT_MODE
+
 
 # ============================================================
 # HỌC SINH / MÔN HỌC
@@ -324,7 +326,7 @@ async def handle_tool_call(session, function_calls):
 # ============================================================
 
 async def process_user_text(session, text):
-    global current_mode, current_student, current_student_id, current_subject
+    global current_mode, current_subject
 
     if not text:
         return
@@ -334,7 +336,6 @@ async def process_user_text(session, text):
     student = command["student"]
     subject = command["subject"]
 
-    # Khi Lão sư nói trực tiếp với Tiểu Vũ, luôn quay lại Chat Mode.
     if mentions_teacher(text):
         await exit_tutor_mode(session)
         await session.send_realtime_input(text=text)
@@ -361,12 +362,11 @@ async def process_user_text(session, text):
         await session.send_realtime_input(text="Người nói muốn bắt đầu học nhưng chưa nói tên học sinh. Hãy hỏi thật ngắn: Tiểu Vũ dạy Mini hay Minh Tiên nè? Chỉ hỏi một câu.")
         return
 
-    # Chat hoặc câu trả lời trong Tutor Mode được gửi nguyên văn cho Gemini.
     await send_text(session, text)
 
 
 # ============================================================
-# AUDIO - GIỮ ĐƠN GIẢN, KHÔNG ĐỂ AUDIO LẤN ÁT LOGIC NÃO
+# AUDIO / STT
 # ============================================================
 
 def pcm_to_wav(pcm: bytes) -> bytes:
@@ -389,6 +389,23 @@ def rms(pcm: bytes) -> float:
     return math.sqrt(sum(x * x for x in samples) / count)
 
 
+def trim_silence(pcm: bytes, threshold=120):
+    """Cắt im lặng đầu/cuối trước khi gửi audio sang Whisper."""
+    if not pcm:
+        return pcm
+    frame_bytes = BLOCKSIZE * 2
+    frames = [pcm[i:i + frame_bytes] for i in range(0, len(pcm), frame_bytes)]
+    active = [rms(frame) >= threshold for frame in frames if frame]
+    if not any(active):
+        return b""
+    first = next(i for i, active_frame in enumerate(active) if active_frame)
+    last = len(active) - 1 - next(i for i, active_frame in enumerate(reversed(active)) if active_frame)
+    # Giữ lại một frame trước/sau để không cắt phụ âm đầu/cuối.
+    first = max(0, first - 1)
+    last = min(len(frames) - 1, last + 1)
+    return b"".join(frames[first:last + 1])
+
+
 def transcribe(pcm: bytes) -> str:
     result = groq.audio.transcriptions.create(
         file=("xiaoyu.wav", pcm_to_wav(pcm)),
@@ -396,6 +413,7 @@ def transcribe(pcm: bytes) -> str:
         language=STT_LANGUAGE,
         response_format="json",
         temperature=0.0,
+        prompt="Tiếng Việt hội thoại tự nhiên giữa Lão sư và Tiểu Vũ. Không phải nội dung video, quảng cáo hoặc YouTube.",
     )
     return (getattr(result, "text", "") or "").strip()
 
@@ -430,16 +448,26 @@ async def microphone_loop(session):
     device = sd.query_devices(MIC, "input")
     print(f"🎙️ MIC device {MIC}: {device['name']}", flush=True)
     print(f"🎙️ MIC channels={CHANNELS} rate={INPUT_RATE} frame={FRAME_MS}ms", flush=True)
+    print(f"🎙️ VAD threshold={VAD_THRESHOLD} end_silence={END_SILENCE_MS}ms", flush=True)
 
-    with sd.RawInputStream(device=MIC, samplerate=INPUT_RATE, channels=CHANNELS, dtype="int16", blocksize=BLOCKSIZE, callback=callback):
+    with sd.RawInputStream(
+        device=MIC,
+        samplerate=INPUT_RATE,
+        channels=CHANNELS,
+        dtype="int16",
+        blocksize=BLOCKSIZE,
+        callback=callback,
+    ):
         while not shutdown_requested:
             frame = await queue.get()
             if not listen_enabled or model_speaking:
                 preroll.clear()
                 continue
+
             preroll.append(frame)
-            if len(preroll) > 10:
+            if len(preroll) > PREROLL_FRAMES:
                 preroll.pop(0)
+
             if rms(frame) < VAD_THRESHOLD:
                 continue
 
@@ -452,26 +480,35 @@ async def microphone_loop(session):
                 frame = await queue.get()
                 audio.extend(frame)
                 speech_ms += FRAME_MS
-                if rms(frame) >= VAD_THRESHOLD:
+                level = rms(frame)
+
+                if level >= VAD_THRESHOLD:
                     silence_ms = 0
                 else:
                     silence_ms += FRAME_MS
+
                 if silence_ms >= END_SILENCE_MS:
                     break
 
             listen_enabled = False
             preroll.clear()
-            if speech_ms < MIN_SPEECH_MS:
+
+            clean_audio = trim_silence(bytes(audio))
+            clean_ms = len(clean_audio) / 2 / INPUT_RATE * 1000
+
+            if clean_ms < MIN_SPEECH_MS:
+                print("🔴 MIC: đoạn tiếng quá ngắn, bỏ qua", flush=True)
                 listen_enabled = True
                 continue
 
-            print(f"🔴 MIC: kết thúc câu ({speech_ms} ms) → Groq Whisper", flush=True)
+            print(f"🔴 MIC: kết thúc câu ({clean_ms:.0f} ms sạch) → Groq Whisper", flush=True)
             try:
-                text = await asyncio.to_thread(transcribe, bytes(audio))
+                text = await asyncio.to_thread(transcribe, clean_audio)
             except Exception as exc:
                 print("⚠️ Groq Whisper lỗi:", repr(exc), flush=True)
                 listen_enabled = True
                 continue
+
             if not text:
                 print("📝 Groq Whisper: không nhận được text", flush=True)
                 listen_enabled = True
