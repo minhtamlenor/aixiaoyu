@@ -13,6 +13,7 @@ from collections import deque
 
 import sounddevice as sd
 from groq import Groq
+from google.genai import types
 
 import live_voice as brain
 
@@ -72,6 +73,22 @@ async def transcribe(audio: bytes) -> str:
         return ""
 
 
+async def send_user_text_to_gemini(session, text):
+    """Gửi một câu đã được Groq STT chốt thành một turn hoàn chỉnh.
+
+    Không gửi bằng realtime_input(text=...) ở đây: với kiến trúc external STT
+    + manual VAD, đường đó có thể để turn ở trạng thái chưa hoàn tất. Dùng
+    client-content với turn_complete=True để Gemini phát AUDIO ngay.
+    """
+    await session.send_client_content(
+        turns=types.Content(
+            role="user",
+            parts=[types.Part(text=text)],
+        ),
+        turn_complete=True,
+    )
+
+
 async def deliver_text_to_brain(session, text):
     text = (text or "").strip()
     if not text:
@@ -91,13 +108,15 @@ async def deliver_text_to_brain(session, text):
 
     await brain.process_user_text(session, text)
 
+    # Tutor/lesson controller đã tự gửi prompt vào Gemini.
     if handled_by_controller or lesson_answer:
         return
 
     try:
-        await session.send_realtime_input(text=text)
+        await send_user_text_to_gemini(session, text)
+        print("📨 Đã gửi turn hoàn chỉnh vào Gemini.", flush=True)
     except Exception as exc:
-        print("⚠️ Gửi text vào Gemini lỗi:", repr(exc), flush=True)
+        print("⚠️ Gửi turn text vào Gemini lỗi:", repr(exc), flush=True)
 
 
 def _is_speech(frame: bytes) -> bool:
@@ -165,9 +184,6 @@ async def microphone_loop(audio_queue):
         while not brain.shutdown_requested:
             frame = await audio_queue.get()
 
-            # Chỉ khóa mic khi Gemini thực sự đang phát tiếng.
-            # Không dùng listen_ready ở đây vì state này thuộc transport cũ
-            # và có thể còn False dù microphone đã sẵn sàng.
             if brain.model_speaking:
                 preroll.clear()
                 speech.clear()
@@ -211,8 +227,6 @@ async def start_voice_io():
     _groq_client()
 
     brain.shutdown_requested = False
-    # voice_io tự quản lý việc mở microphone; không để state listen_ready
-    # của transport cũ chặn tai mới.
     brain.listen_ready = True
     brain.model_speaking = False
     brain.startup_greeting_sent = False
