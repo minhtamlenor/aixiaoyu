@@ -34,13 +34,30 @@ MODEL = "gemini-3.1-flash-live-preview"
 STT_MODEL = "whisper-large-v3-turbo"
 STT_LANGUAGE = "vi"
 
-# VAD: bắt đầu nghe khi âm lượng thực sự vượt ngưỡng,
-# kết thúc nhanh hơn sau khi người nói ngừng.
+# VAD: cần vài frame liên tiếp có tiếng mới bắt đầu ghi,
+# tránh gửi tiếng nền / tiếng vọng rất ngắn sang Whisper.
 VAD_THRESHOLD = 240
-END_SILENCE_MS = 600
+START_SPEECH_MS = 120
+END_SILENCE_MS = 750
 PREROLL_FRAMES = 5
 MIN_SPEECH_MS = 300
 MAX_SPEECH_MS = 30000
+
+# Whisper đôi khi hallucinate các câu kiểu YouTube khi audio gần như rỗng.
+# Những câu này phải bị loại ngay tại lớp "tai", tuyệt đối không đưa vào não Gemini.
+WHISPER_GARBAGE_PATTERNS = [
+    "hãy subscribe cho kênh",
+    "subscribe cho kênh",
+    "để không bỏ lỡ những video",
+    "cảm ơn các bạn đã theo dõi",
+    "hẹn gặp lại",
+    "đừng quên đăng ký",
+    "đừng quên subscribe",
+    "nhớ đăng ký kênh",
+    "bấm đăng ký",
+    "theo dõi kênh",
+    "video hấp dẫn",
+]
 
 CHAT_MODE = "chat"
 TUTOR_MODE = "tutor"
@@ -400,10 +417,21 @@ def trim_silence(pcm: bytes, threshold=120):
         return b""
     first = next(i for i, active_frame in enumerate(active) if active_frame)
     last = len(active) - 1 - next(i for i, active_frame in enumerate(reversed(active)) if active_frame)
-    # Giữ lại một frame trước/sau để không cắt phụ âm đầu/cuối.
     first = max(0, first - 1)
     last = min(len(frames) - 1, last + 1)
     return b"".join(frames[first:last + 1])
+
+
+def clean_whisper_text(text: str) -> str:
+    """Chuẩn hóa và loại các transcript rõ ràng là hallucination của Whisper."""
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if not text:
+        return ""
+    normalized = remove_accents(text)
+    for pattern in WHISPER_GARBAGE_PATTERNS:
+        if remove_accents(pattern) in normalized:
+            return ""
+    return text
 
 
 def transcribe(pcm: bytes) -> str:
@@ -415,7 +443,7 @@ def transcribe(pcm: bytes) -> str:
         temperature=0.0,
         prompt="Tiếng Việt hội thoại tự nhiên giữa Lão sư và Tiểu Vũ. Không phải nội dung video, quảng cáo hoặc YouTube.",
     )
-    return (getattr(result, "text", "") or "").strip()
+    return clean_whisper_text(getattr(result, "text", "") or "")
 
 
 async def send_text(session, text):
@@ -448,7 +476,7 @@ async def microphone_loop(session):
     device = sd.query_devices(MIC, "input")
     print(f"🎙️ MIC device {MIC}: {device['name']}", flush=True)
     print(f"🎙️ MIC channels={CHANNELS} rate={INPUT_RATE} frame={FRAME_MS}ms", flush=True)
-    print(f"🎙️ VAD threshold={VAD_THRESHOLD} end_silence={END_SILENCE_MS}ms", flush=True)
+    print(f"🎙️ VAD threshold={VAD_THRESHOLD} start={START_SPEECH_MS}ms end_silence={END_SILENCE_MS}ms", flush=True)
 
     with sd.RawInputStream(
         device=MIC,
@@ -468,12 +496,28 @@ async def microphone_loop(session):
             if len(preroll) > PREROLL_FRAMES:
                 preroll.pop(0)
 
+            # Không bắt đầu chỉ vì một frame nhiễu. Cần một cụm frame liên tiếp vượt ngưỡng.
             if rms(frame) < VAD_THRESHOLD:
                 continue
 
+            candidate = list(preroll)
+            candidate_active_ms = FRAME_MS
+            while listen_enabled and not model_speaking and candidate_active_ms < START_SPEECH_MS:
+                next_frame = await queue.get()
+                candidate.append(next_frame)
+                if rms(next_frame) >= VAD_THRESHOLD:
+                    candidate_active_ms += FRAME_MS
+                else:
+                    candidate_active_ms = 0
+                    candidate = candidate[-PREROLL_FRAMES:]
+
+            if candidate_active_ms < START_SPEECH_MS:
+                preroll.clear()
+                continue
+
             print("🟢 MIC: bắt đầu nghe", flush=True)
-            audio = bytearray(b"".join(preroll))
-            speech_ms = len(preroll) * FRAME_MS
+            audio = bytearray(b"".join(candidate))
+            speech_ms = len(candidate) * FRAME_MS
             silence_ms = 0
 
             while listen_enabled and not model_speaking and speech_ms < MAX_SPEECH_MS:
@@ -497,7 +541,7 @@ async def microphone_loop(session):
             clean_ms = len(clean_audio) / 2 / INPUT_RATE * 1000
 
             if clean_ms < MIN_SPEECH_MS:
-                print("🔴 MIC: đoạn tiếng quá ngắn, bỏ qua", flush=True)
+                print("🔴 MIC: đoạn tiếng quá ngắn / gần như im lặng, bỏ qua", flush=True)
                 listen_enabled = True
                 continue
 
@@ -510,7 +554,7 @@ async def microphone_loop(session):
                 continue
 
             if not text:
-                print("📝 Groq Whisper: không nhận được text", flush=True)
+                print("🧹 Whisper: bỏ qua transcript rỗng / nghi là tiếng nền", flush=True)
                 listen_enabled = True
                 continue
 
