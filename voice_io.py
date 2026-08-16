@@ -6,13 +6,13 @@
 # ============================================================
 
 import asyncio
+import audioop
 import os
 import subprocess
 import time
 from collections import deque
 
 import sounddevice as sd
-import webrtcvad
 from groq import Groq
 
 import live_voice as brain
@@ -21,11 +21,14 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 FRAME_MS = 30
 FRAME_BYTES = SAMPLE_RATE * FRAME_MS // 1000 * 2
-VAD_MODE = 2
 PREROLL_MS = 240
 END_SILENCE_MS = 720
 MIN_SPEECH_MS = 180
 MAX_UTTERANCE_MS = 15000
+
+# Simple PCM energy VAD. This avoids the native WebRTC VAD package,
+# which currently fails to build under the user's Python 3.14 environment.
+VAD_RMS_THRESHOLD = 420
 
 STT_MODEL = "whisper-large-v3-turbo"
 STT_LANGUAGE = "vi"
@@ -186,10 +189,17 @@ async def deliver_text_to_brain(session, text):
 # ============================================================
 # MICROPHONE SEGMENTER
 # ============================================================
+def _is_speech(frame: bytes) -> bool:
+    """Detect speech from 16-bit PCM energy without native dependencies."""
+    try:
+        return audioop.rms(frame, 2) >= VAD_RMS_THRESHOLD
+    except Exception:
+        return False
+
+
 async def microphone_loop(audio_queue):
     loop = asyncio.get_running_loop()
     preroll = deque(maxlen=max(1, PREROLL_MS // FRAME_MS))
-    vad = webrtcvad.Vad(VAD_MODE)
 
     def callback(indata, frames, time_info, status):
         if status:
@@ -236,7 +246,7 @@ async def microphone_loop(audio_queue):
                 silence_ms = 0
                 continue
 
-            is_speech = vad.is_speech(frame, SAMPLE_RATE)
+            is_speech = _is_speech(frame)
             preroll.append(frame)
 
             if not speech_started:
