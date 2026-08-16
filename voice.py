@@ -135,13 +135,13 @@ async def send_text(session, text: str):
 
 
 async def microphone_loop(session):
-    global listen_enabled, shutdown_requested
+    global listen_enabled, shutdown_requested, CURRENT_MODE
 
     loop = asyncio.get_running_loop()
     queue = asyncio.Queue(maxsize=100)
     preroll = []
 
-    def enqueue(data):
+    def enqueue(data: bytes):
         if queue.full():
             try:
                 queue.get_nowait()
@@ -156,7 +156,11 @@ async def microphone_loop(session):
         if status:
             print("MIC:", status, flush=True)
         if listen_enabled and not model_speaking:
-            asyncio.run_coroutine_threadsafe(enqueue(indata.tobytes()), loop)
+            # RawInputStream supplies a cffi buffer, not a numpy array.
+            # Convert it directly to bytes and schedule the normal queue
+            # callback on the asyncio event loop thread.
+            data = bytes(indata)
+            loop.call_soon_threadsafe(enqueue, data)
 
     device = sd.query_devices(MIC, "input")
     print(f"🎙️ MIC device {MIC}: {device['name']}", flush=True)
@@ -225,7 +229,6 @@ async def microphone_loop(session):
             print("📝 Groq Whisper:", text, flush=True)
             print("👤 Lão sư:", text, flush=True)
 
-            global CURRENT_MODE
             if CURRENT_MODE == CHAT_MODE and is_tutor_trigger(text):
                 CURRENT_MODE = TUTOR_MODE
                 print("🎓 CHUYỂN SANG CHẾ ĐỘ GIA SƯ", flush=True)
