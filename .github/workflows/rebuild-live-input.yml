@@ -1,12 +1,16 @@
 name: Rebuild Live Voice input transport
 
-on: push
+"on":
+  push:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   rebuild:
+    if: "!contains(github.event.head_commit.message, 'Rebuild Live Voice input transport')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
