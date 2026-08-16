@@ -1,0 +1,138 @@
+name: Rebuild Live Voice input transport
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    if: "!contains(github.event.head_commit.message, 'Rebuild Live Voice input transport')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replace microphone transport with proven path
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('live_voice.py')
+          s = p.read_text(encoding='utf-8')
+
+          start_marker = '# ============================================================\n# MICROPHONE: MANUAL VAD'
+          end_marker = '# ============================================================\n# RECEIVE LOOP'
+          start = s.index(start_marker)
+          end = s.index(end_marker, start)
+
+          new_microphone = r'''# ============================================================
+# MICROPHONE: GEMINI AUTOMATIC VAD
+# ============================================================
+# The isolated tools/test_live_mic.py proves this exact transport works:
+# sounddevice -> 16 kHz PCM -> Gemini Live -> input transcription.
+# Keep the runtime microphone path identical and let Gemini own turn detection.
+
+async def microphone_sender(session):
+    global listen_ready, model_speaking
+    loop = asyncio.get_running_loop()
+    audio_queue = asyncio.Queue(maxsize=80)
+    stopped = False
+
+    def enqueue(data):
+        if stopped or shutdown_requested:
+            return
+        try:
+            audio_queue.put_nowait(data)
+        except asyncio.QueueFull:
+            try:
+                audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                audio_queue.put_nowait(data)
+            except asyncio.QueueFull:
+                pass
+
+    def callback(indata, frames, time_info, status):
+        if status:
+            print("MIC:", status, flush=True)
+        try:
+            loop.call_soon_threadsafe(enqueue, indata.tobytes())
+        except Exception as e:
+            print("⚠️ MIC callback lỗi:", repr(e), flush=True)
+
+    try:
+        device_info = sd.query_devices(MIC, "input")
+        print(f"🎙️ MIC device {MIC}: {device_info['name']}", flush=True)
+        print(f"🎙️ MIC channels={CHANNELS} rate={INPUT_RATE} block={BLOCKSIZE}", flush=True)
+    except Exception as e:
+        print("⚠️ Không đọc được thông tin MIC:", repr(e), flush=True)
+
+    with sd.InputStream(
+        device=MIC,
+        samplerate=INPUT_RATE,
+        channels=CHANNELS,
+        dtype="int16",
+        blocksize=BLOCKSIZE,
+        callback=callback,
+    ):
+        print("🎤 Microphone sẵn sàng.", flush=True)
+        print("⏳ Chờ Tiểu Vũ nói xong rồi bắt đầu nghe.", flush=True)
+        sent = 0
+
+        while not shutdown_requested:
+            data = await audio_queue.get()
+
+            # Prevent echo while Tiểu Vũ is speaking. Gemini still owns VAD.
+            if not listen_ready or model_speaking:
+                continue
+
+            try:
+                await session.send_realtime_input(
+                    audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
+                )
+                sent += len(data)
+            except Exception as e:
+                print("⚠️ MIC gửi audio lỗi:", repr(e), flush=True)
+                continue
+
+            if sent >= 32000:
+                print(f"🎤 MIC → Gemini: {sent} bytes", flush=True)
+                sent = 0
+
+'''
+
+          s = s[:start] + new_microphone + s[end:]
+
+          old_config = '''        # Automatic VAD is deliberately disabled. microphone_sender owns the
+        # activity_start/activity_end boundaries.
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
+        ),'''
+          new_config = '''        # Match tools/test_live_mic.py exactly: Gemini owns turn detection.
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                disabled=False,
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                prefix_padding_ms=100,
+                silence_duration_ms=500,
+            )
+        ),'''
+          if old_config not in s:
+              raise SystemExit('Expected disabled VAD config not found; refusing to modify live_voice.py')
+          s = s.replace(old_config, new_config, 1)
+
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Verify and commit only the intended file
+        run: |
+          python -m py_compile live_voice.py
+          git diff --check
+          git add live_voice.py
+          git rm .github/workflows/rebuild-live-input.yml
+          git commit -m "Rebuild Live Voice input transport"
+          git push
