@@ -15,8 +15,8 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 STORY_DIR = BASE_DIR / "stories" / "buddhism"
 
-# In CHAT MODE, generic story requests default to the Buddhist library.
-# This prevents Gemini from inventing an unrelated folk tale such as a tiger/rabbit story.
+# Generic story requests in CHAT MODE always use the Buddhist library.
+# This prevents Gemini from inventing unrelated folk tales.
 STORY_REQUEST_PATTERNS = [
     "kể chuyện phật giáo", "ke chuyen phat giao", "kể chuyện phật", "ke chuyen phat",
     "chuyện phật giáo", "chuyen phat giao", "kể chuyện đức phật", "ke chuyen duc phat",
@@ -124,7 +124,7 @@ def build_story_prompt(story, proactive=False, continuation=False):
     if continuation:
         mode_text = "Lão sư vừa nói muốn nghe tiếp câu chuyện đang kể. Hãy tiếp tục đúng câu chuyện này."
     elif proactive:
-        mode_text = "Tiểu Vũ chủ động đề nghị kể chuyện vì cuộc trò chuyện đang có khoảng lặng."
+        mode_text = "Tiểu Vũ chủ động mở lời kể chuyện vì cuộc trò chuyện đang có khoảng lặng."
     else:
         mode_text = "Lão sư vừa yêu cầu kể chuyện."
     return f"""
@@ -147,19 +147,20 @@ GỢI Ý HÀI ĐỘC THOẠI:
 {story['comedy_angle']}
 
 QUY TẮC KỂ:
-- Đây là câu chuyện được chọn từ THƯ VIỆN PHẬT GIÁO của Tiểu Vũ. Không được thay bằng truyện cổ tích/dân gian khác.
+- Đây là câu chuyện được chọn từ THƯ VIỆN PHẬT GIÁO của Tiểu Vũ. Tuyệt đối không thay bằng truyện cổ tích/dân gian khác.
 - Kể bằng tiếng Việt tự nhiên, giọng một cô gái miền Nam thân thiện.
 - Phong cách hài độc thoại: quan sát đời thường, punchline nhẹ, duyên và thông minh.
 - Có thể cười vào những thói quen rất con người, nhưng KHÔNG chế giễu Đức Phật, giáo pháp, người tu hoặc nỗi đau của người khác.
 - Không bịa thêm sự kiện lịch sử/kinh điển như thể đó là sự thật.
 - Nội dung nền là khung sự kiện; được phép diễn đạt lại cho tự nhiên và hài hước.
 - Không biến câu chuyện thành bài giảng đạo đức khô khan.
-- Sau một đoạn mở đầu hài, kể mạch chuyện rõ ràng rồi rút ra thông điệp ngắn.
 - Kể như đang nói chuyện trực tiếp với Lão sư, không đọc tiêu đề hay các nhãn kỹ thuật.
 - Không nói "theo prompt", "Story Engine", "file", "Markdown" hoặc "nguồn dữ liệu".
 - Không tự chuyển sang Tutor Mode.
-- Mỗi lượt nói một đoạn vừa phải, khoảng 30–90 giây. Sau đó dừng để Lão sư có thể phản ứng.
-- Nếu đây là lượt tiếp tục, KHÔNG chọn câu chuyện mới và không kể lại phần đã kể; tiếp tục từ mạch chuyện hiện tại.
+- QUAN TRỌNG: Hãy kể TRỌN VẸN CÂU CHUYỆN TRONG MỘT LƯỢT NÓI LIÊN TỤC. Không dừng giữa chừng để hỏi Lão sư đoán, không đặt câu hỏi tương tác, không yêu cầu Lão sư trả lời và không kết thúc bằng "Lão sư có muốn nghe tiếp không?".
+- Có thể mở đầu bằng một câu hài ngắn, sau đó kể toàn bộ diễn biến từ đầu đến cuối, rồi chốt bằng thông điệp ngắn.
+- Không tự tạo thêm một câu chuyện khác sau khi kết thúc.
+- Nếu đây là lượt tiếp tục, KHÔNG chọn câu chuyện mới và không kể lại phần đã kể; tiếp tục đúng mạch câu chuyện hiện tại và cũng kể liền mạch đến hết phần còn lại.
 """
 
 
