@@ -15,12 +15,17 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 STORY_DIR = BASE_DIR / "stories" / "buddhism"
 
+# In CHAT MODE, generic story requests default to the Buddhist library.
+# This prevents Gemini from inventing an unrelated folk tale such as a tiger/rabbit story.
 STORY_REQUEST_PATTERNS = [
     "kể chuyện phật giáo", "ke chuyen phat giao", "kể chuyện phật", "ke chuyen phat",
     "chuyện phật giáo", "chuyen phat giao", "kể chuyện đức phật", "ke chuyen duc phat",
     "phật giáo kể chuyện", "phat giao ke chuyen", "chuyện đạo phật", "chuyen dao phat",
-    "kể chuyện đạo phật", "ke chuyen dao phat", "kể tiếp chuyện", "ke tiep chuyen",
-    "kể tiếp đi", "ke tiep di",
+    "kể chuyện đạo phật", "ke chuyen dao phat",
+    "kể chuyện", "ke chuyen", "kể truyện", "ke truyen", "chuyện đi", "chuyen di",
+    "truyện đi", "truyen di", "kể đi", "ke di", "rồi kể đi", "roi ke di",
+    "kể nghe", "ke nghe", "kể tuyện", "ke tuyen", "kể truyện nghe", "ke truyen nghe",
+    "kể tiếp chuyện", "ke tiep chuyen", "kể tiếp đi", "ke tiep di", "tiếp đi", "tiep di",
 ]
 
 PROACTIVE_ENABLED = True
@@ -142,6 +147,7 @@ GỢI Ý HÀI ĐỘC THOẠI:
 {story['comedy_angle']}
 
 QUY TẮC KỂ:
+- Đây là câu chuyện được chọn từ THƯ VIỆN PHẬT GIÁO của Tiểu Vũ. Không được thay bằng truyện cổ tích/dân gian khác.
 - Kể bằng tiếng Việt tự nhiên, giọng một cô gái miền Nam thân thiện.
 - Phong cách hài độc thoại: quan sát đời thường, punchline nhẹ, duyên và thông minh.
 - Có thể cười vào những thói quen rất con người, nhưng KHÔNG chế giễu Đức Phật, giáo pháp, người tu hoặc nỗi đau của người khác.
