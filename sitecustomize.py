@@ -25,7 +25,7 @@ if not getattr(voice, "_xiaoyu_story_bootstrap_v1", False):
     _story_task = None
 
     async def _proactive_story_loop(session):
-        nonlocal _story_last_user_activity
+        global _story_last_user_activity
         while not voice.shutdown_requested:
             try:
                 await asyncio.sleep(5)
@@ -49,12 +49,12 @@ if not getattr(voice, "_xiaoyu_story_bootstrap_v1", False):
                 print("⚠️ Proactive Buddhist story lỗi:", repr(exc), flush=True)
 
     def _ensure_story_task(session):
-        nonlocal _story_task
+        global _story_task
         if _story_task is None or _story_task.done():
             _story_task = asyncio.create_task(_proactive_story_loop(session))
 
     async def _story_process_user_text(session, text):
-        nonlocal _story_last_user_activity
+        global _story_last_user_activity
         _story_last_user_activity = time.monotonic()
 
         if voice.current_mode == voice.CHAT_MODE and is_story_request(text):
