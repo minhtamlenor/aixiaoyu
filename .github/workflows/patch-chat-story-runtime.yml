@@ -1,0 +1,111 @@
+name: Patch Chat Story Runtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "main.py"
+      - "story_engine.py"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch main.py without touching core voice/tutor runtime
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("main.py")
+          text = path.read_text(encoding="utf-8")
+
+          if "# STORY ENGINE RUNTIME PATCH v2" in text:
+              print("Story runtime patch already present.")
+              raise SystemExit(0)
+
+          text = text.replace(
+              "import datetime\nimport voice\n",
+              "import datetime\nimport time\nimport voice\n\nfrom story_engine import (\n    get_story_prompt,\n    is_story_request,\n    is_story_continue_request,\n    proactive_story_allowed,\n)\n",
+              1,
+          )
+
+          marker = "_original_start_tutor_session = voice.start_tutor_session\n_original_process_user_text = voice.process_user_text\n"
+          replacement = marker + """
+
+# STORY ENGINE RUNTIME PATCH v2
+# Runtime used by `python main.py` is voice.py. Keep voice/audio/tutor core intact;
+# this wrapper adds Buddhist storytelling around the existing Chat Mode only.
+_story_last_user_activity = time.monotonic()
+_story_task = None
+
+
+async def _proactive_buddhist_story_loop(session):
+    global _story_last_user_activity
+    while not voice.shutdown_requested:
+        try:
+            await asyncio.sleep(5)
+            if voice.current_mode != voice.CHAT_MODE:
+                continue
+            if voice.model_speaking or not voice.listen_enabled:
+                continue
+            if not proactive_story_allowed(_story_last_user_activity):
+                continue
+
+            prompt = get_story_prompt(proactive=True)
+            if not prompt:
+                continue
+
+            print("📖 Tiểu Vũ chủ động mở chuyện Phật giáo.", flush=True)
+            await _original_send_text(session, prompt)
+            _story_last_user_activity = time.monotonic()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            print("⚠️ Proactive Buddhist story lỗi:", repr(exc), flush=True)
+
+
+def _ensure_story_task(session):
+    global _story_task
+    if _story_task is None or _story_task.done():
+        _story_task = asyncio.create_task(_proactive_buddhist_story_loop(session))
+"""
+          if marker not in text:
+              raise SystemExit("Could not find runtime insertion marker")
+          text = text.replace(marker, replacement, 1)
+
+          old = """    # Chuyển riêng sang giao tiếp tiếng Trung khi Lão sư yêu cầu.\n"""
+          new = """    # Chat Mode: story requests always use the Buddhist Story Library.\n    # Generic requests such as 'kể chuyện đi' must not fall through to Gemini's free-form storytelling.\n    global _story_last_user_activity\n    _story_last_user_activity = time.monotonic()\n    if voice.current_mode == voice.CHAT_MODE and is_story_request(text):\n        story_prompt = get_story_prompt(\n            continuation=is_story_continue_request(text)\n        )\n        if story_prompt:\n            await _original_send_text(session, story_prompt)\n            return\n\n    # Chuyển riêng sang giao tiếp tiếng Trung khi Lão sư yêu cầu.\n"""
+          if old not in text:
+              raise SystemExit("Could not find process_user_text insertion marker")
+          text = text.replace(old, new, 1)
+
+          old = """async def _send_text_with_startup_guard(session, text):\n    if text.strip() == \"Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới.\":\n"""
+          new = """async def _send_text_with_startup_guard(session, text):\n    _ensure_story_task(session)\n    if text.strip() == \"Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới.\":\n"""
+          if old not in text:
+              raise SystemExit("Could not find startup guard marker")
+          text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding="utf-8")
+          print("Patched main.py with Buddhist Story Engine runtime.")
+
+      - name: Validate Python syntax
+        run: python -m py_compile main.py story_engine.py
+
+      - name: Commit verified patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add main.py
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "STATUS: SUCCESS — Fix proactive Buddhist storytelling in Chat Mode"
+          git push
