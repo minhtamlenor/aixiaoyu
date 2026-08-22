@@ -6,6 +6,7 @@
 import asyncio
 import math
 import re
+import time
 import unicodedata
 from array import array
 from collections import deque
@@ -20,6 +21,12 @@ from personality import SYSTEM_INSTRUCTION
 from tools.time_tool import get_time_text
 from tools.calculator import calculate
 from tools.calendar_tool import get_calendar_text
+from story_engine import (
+    get_story_prompt,
+    is_story_request,
+    is_story_continue_request,
+    proactive_story_allowed,
+)
 from tutor.lesson_flow import (
     start_lesson,
     next_lesson_question,
@@ -41,6 +48,8 @@ model_speaking = False
 listen_ready = False
 shutdown_requested = False
 startup_greeting_sent = False
+story_task = None
+last_user_activity = time.monotonic()
 command_suppressed_until = 0.0
 
 # Tutor state
@@ -374,6 +383,18 @@ async def process_user_text(session, text):
         print("🔇 Bỏ qua tiếng của Tiểu Vũ:", text, flush=True)
         return
     print("\n👤 Người nói:", text, flush=True)
+
+    # Chat Mode: Buddhist Story Engine. Tutor Mode always wins.
+    global last_user_activity
+    last_user_activity = time.monotonic()
+    if not tutor_mode and is_story_request(text):
+        story_prompt = get_story_prompt(
+            continuation=is_story_continue_request(text)
+        )
+        if story_prompt:
+            await send_text_command(session, story_prompt, 2)
+            return
+
     if detect_farewell(text):
         await exit_tutor_mode(session)
         return
@@ -748,6 +769,31 @@ async def receive_loop(session):
         speaker_queue = None
 
 # ============================================================
+# PROACTIVE STORYTELLING
+# ============================================================
+async def proactive_story_loop(session):
+    """In Chat Mode, gently offer a Buddhist story after a quiet period."""
+    global last_user_activity
+    while not shutdown_requested:
+        try:
+            await asyncio.sleep(5)
+            if tutor_mode or model_speaking or not listen_ready:
+                continue
+            if not proactive_story_allowed(last_user_activity):
+                continue
+            prompt = get_story_prompt(proactive=True)
+            if not prompt:
+                continue
+            print("📖 Tiểu Vũ chủ động mở chuyện Phật giáo.", flush=True)
+            await send_text_command(session, prompt, 2)
+            last_user_activity = time.monotonic()
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            print("⚠️ Proactive story lỗi:", repr(e), flush=True)
+
+
+# ============================================================
 # LIVE CONFIG
 # ============================================================
 def build_live_config():
@@ -803,9 +849,10 @@ TOOLS: Hỏi giờ dùng current_time. Tính dùng calculator. Ngày dùng curre
 # CONNECTION LIFECYCLE
 # ============================================================
 async def run_one_connection():
-    global listen_ready, startup_greeting_sent
+    global listen_ready, startup_greeting_sent, story_task, last_user_activity
     listen_ready = False
     startup_greeting_sent = False
+    last_user_activity = time.monotonic()
     open_speaker()
     config = build_live_config()
     try:
@@ -813,10 +860,18 @@ async def run_one_connection():
             print("✅ Gemini Live connected", flush=True)
             receive_task = asyncio.create_task(receive_loop(session))
             microphone_task = asyncio.create_task(microphone_sender(session))
+            story_task = asyncio.create_task(proactive_story_loop(session))
             await asyncio.sleep(0.25)
             await send_startup_greeting(session)
             await asyncio.gather(receive_task, microphone_task)
     finally:
+        if story_task:
+            story_task.cancel()
+            try:
+                await story_task
+            except Exception:
+                pass
+            story_task = None
         listen_ready = False
         clear_speaker_queue()
         close_speaker()
