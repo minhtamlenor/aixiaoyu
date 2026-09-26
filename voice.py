@@ -32,13 +32,13 @@ CHANNELS = 1
 FRAME_MS = 30
 BLOCKSIZE = INPUT_RATE * FRAME_MS // 1000
 MODEL = "gemini-3.1-flash-live-preview"
-STT_MODEL = "whisper-large-v3-turbo"
+STT_MODEL = "whisper-large-v3"
 
 # VAD: cần vài frame liên tiếp có tiếng mới bắt đầu ghi,
 # tránh gửi tiếng nền / tiếng vọng rất ngắn sang Whisper.
 VAD_THRESHOLD = 240
 START_SPEECH_MS = 120
-END_SILENCE_MS = 750
+END_SILENCE_MS = 500
 PREROLL_FRAMES = 5
 MIN_SPEECH_MS = 300
 MAX_SPEECH_MS = 30000
@@ -491,25 +491,35 @@ def _whisper_quality(result, text: str) -> tuple[bool, str]:
 
 
 def _create_whisper_result(language=None):
+    if language == "zh":
+        prompt = (
+            "这是老师和小雨之间的自然中文口语对话。"
+            "请准确转写实际说出的普通话，保留正确的汉字。"
+            "不要补充没有说出的内容，不要把中文转换成越南语。"
+        )
+    elif language == "vi":
+        prompt = (
+            "Đây là hội thoại tự nhiên bằng tiếng Việt giữa Lão sư và Tiểu Vũ. "
+            "Chỉ chép đúng những gì thực sự được nói, không tự thêm nội dung."
+        )
+    else:
+        prompt = None
+
     kwargs = {
         "file": ("xiaoyu.wav", None),
         "model": STT_MODEL,
         "response_format": "verbose_json",
         "temperature": 0.0,
-        "prompt": (
-            "Đây là hội thoại trực tiếp giữa Lão sư và Tiểu Vũ. "
-            "Không tự bịa nội dung video, quảng cáo, YouTube hoặc câu kêu gọi đăng ký khi audio không có lời nói rõ ràng. "
-            "Nếu người nói im lặng hoặc audio chỉ có tiếng nền, transcript phải để trống. "
-            "Nếu là tiếng Trung, giữ đúng chữ Hán/Pinyin theo lời người nói và không chuyển thành cách đọc tiếng Việt."
-        ),
     }
+    if prompt:
+        kwargs["prompt"] = prompt
     if language:
         kwargs["language"] = language
     return kwargs
 
 
 def transcribe(pcm: bytes) -> dict:
-    """Whisper tự nhận diện trong chat; nếu câu ngắn/mơ hồ thì thử thêm Mandarin và chỉ nhận fallback khi có dấu hiệu tiếng Trung."""
+    """Một lượt Whisper chất lượng cao; không chạy thêm fallback zh gây trễ và dễ nhận sai."""
     language = _stt_language()
     base_kwargs = _create_whisper_result(language)
     base_kwargs["file"] = ("xiaoyu.wav", pcm_to_wav(pcm))
@@ -517,32 +527,6 @@ def transcribe(pcm: bytes) -> dict:
     result = groq.audio.transcriptions.create(**base_kwargs)
     text = clean_whisper_text(getattr(result, "text", "") or "")
     quality_ok, quality_reason = _whisper_quality(result, text)
-
-    # CHAT MODE phải nghe được cả tiếng Việt lẫn tiếng Trung. Nếu auto-detect
-    # trả rỗng, quá ngắn hoặc có vẻ là pinyin/Latin, thử một lượt zh.
-    # Chỉ nhận kết quả zh nếu nó thực sự có dấu hiệu Mandarin; tránh hallucination
-    # tiếng Trung khi microphone chỉ có tiếng nền/im lặng.
-    should_try_zh = (
-        language is None
-        and (
-            not text
-            or not quality_ok
-            or len(text) <= 12
-            or not _has_chinese_characters(text)
-        )
-    )
-
-    if should_try_zh:
-        try:
-            zh_kwargs = _create_whisper_result("zh")
-            zh_kwargs["file"] = ("xiaoyu.wav", pcm_to_wav(pcm))
-            zh_result = groq.audio.transcriptions.create(**zh_kwargs)
-            zh_text = clean_whisper_text(getattr(zh_result, "text", "") or "")
-            zh_ok, zh_reason = _whisper_quality(zh_result, zh_text)
-            if zh_ok and _is_likely_chinese_transcript(zh_text):
-                return {"text": zh_text, "reason": "ok", "language": "zh", "fallback": True}
-        except Exception as exc:
-            print("⚠️ Whisper zh fallback lỗi:", repr(exc), flush=True)
 
     if not quality_ok:
         return {"text": "", "reason": quality_reason, "language": language or "auto"}
@@ -730,7 +714,7 @@ async def receive_loop(session):
                         else:
                             output.write(data)
 
-            if getattr(content, "turn_complete", False):
+            if getattr(content, "generation_complete", False) or getattr(content, "turn_complete", False):
                 if model_speaking:
                     if current_mode == CHAT_MODE:
                         transcript = "".join(chat_transcript_parts).strip()
