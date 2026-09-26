@@ -299,7 +299,7 @@ def _time_aware_startup_greeting():
 
 
 async def _send_text_with_startup_guard(session, text):
-    if text.strip() == "Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới.":
+    if text.strip() == "Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới." or text.strip().startswith("XIAOYU_CHAT_MODE_BOOT:"):
         greeting = _time_aware_startup_greeting()
         text = f"""
 CHAT MODE 启动。你现在是小雨（Xiǎo Yǔ），是 Lão sư 的中文朋友。
