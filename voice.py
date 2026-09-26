@@ -836,7 +836,7 @@ QUY TẮC LỚP TAI / WHISPER:
         mic_task = asyncio.create_task(microphone_loop(session))
 
         await asyncio.sleep(0.3)
-        await send_text(session, "Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới.")
+        await send_text(session, "XIAOYU_CHAT_MODE_BOOT: 现在立即用中文向 Lão sư 自然地打招呼，并开启一个简单话题。只说一两句短话，最多问一个问题，然后停止等待。")
 
         try:
             await asyncio.gather(receive_task, mic_task)
