@@ -13,7 +13,7 @@ from google import genai
 from google.genai import types
 
 from personality import SYSTEM_INSTRUCTION as PERSONALITY_INSTRUCTION
-from chat_tts import is_chinese_text, synthesize_xiaoxiao_pcm
+from chat_tts import is_chinese_text, split_complete_sentences, synthesize_xiaoxiao_pcm
 from tools.time_tool import get_time_text
 from tools.calculator import calculate
 from tools.calendar_tool import get_calendar_text
@@ -673,75 +673,145 @@ async def microphone_loop(session):
 async def receive_loop(session):
     global listen_enabled, model_speaking, shutdown_requested
 
-    # Chat Mode buffers one short response so Mandarin can use the same
-    # XiaoxiaoNeural voice as the Xiang Xiang HSK project. Tutor Mode keeps
-    # the existing Gemini streaming audio path unchanged.
+    # Chat Mode: Gemini vẫn stream bình thường, nhưng Xiaoxiao được
+    # chuẩn bị theo từng câu hoàn chỉnh. TTS chạy song song với phần
+    # Gemini còn đang sinh câu kế tiếp; playback có một worker duy nhất
+    # để không chồng tiếng và không làm nghẽn receive_loop.
     chat_audio_buffer = bytearray()
     chat_transcript_parts = []
+    chat_sentence_buffer = ""
+    chat_tts_queue = asyncio.Queue()
+    chat_tts_tasks = []
+    chat_tts_failed = False
+    chat_tts_playback_started = False
+    chat_turn_finished = False
 
-    while not shutdown_requested:
-        async for response in session.receive():
-            tool_call = getattr(response, "tool_call", None)
-            if tool_call is not None:
-                calls = getattr(tool_call, "function_calls", None)
-                if calls:
-                    await handle_tool_call(session, calls)
+    async def chat_tts_worker():
+        nonlocal chat_tts_failed, chat_tts_playback_started
+        while True:
+            item = await chat_tts_queue.get()
+            if item is None:
+                chat_tts_queue.task_done()
+                return
+            try:
+                pcm = await item
+                if pcm:
+                    # sounddevice.write là blocking; đẩy sang thread riêng
+                    # để Gemini vẫn nhận event trong lúc Xiaoxiao đang nói.
+                    await asyncio.to_thread(output.write, pcm)
+                    chat_tts_playback_started = True
+            except Exception as exc:
+                chat_tts_failed = True
+                print("⚠️ Xiaoxiao TTS/playback lỗi:", repr(exc), flush=True)
+            finally:
+                chat_tts_queue.task_done()
 
-            content = getattr(response, "server_content", None)
-            if content is None:
-                continue
+    chat_tts_worker_task = asyncio.create_task(chat_tts_worker())
 
-            output_transcription = getattr(content, "output_transcription", None)
-            if output_transcription is not None:
-                text = getattr(output_transcription, "text", None)
-                if text:
-                    print("💗 Tiểu Vũ:", text, flush=True)
-                    if current_mode == CHAT_MODE:
-                        chat_transcript_parts.append(text)
+    def queue_xiaoxiao_sentence(sentence):
+        sentence = sentence.strip()
+        if not sentence:
+            return
+        task = asyncio.create_task(synthesize_xiaoxiao_pcm(sentence))
+        chat_tts_tasks.append(task)
+        chat_tts_queue.put_nowait(task)
 
-            model_turn = getattr(content, "model_turn", None)
-            if model_turn is not None:
-                for part in getattr(model_turn, "parts", []) or []:
-                    inline = getattr(part, "inline_data", None)
-                    data = getattr(inline, "data", None) if inline else None
-                    if data:
-                        if not model_speaking:
-                            model_speaking = True
-                            listen_enabled = False
-                            print("🔊 Tiểu Vũ đang nói...", flush=True)
+    async def finish_chat_tts():
+        nonlocal chat_sentence_buffer
+        if chat_sentence_buffer.strip():
+            queue_xiaoxiao_sentence(chat_sentence_buffer.strip())
+            chat_sentence_buffer = ""
+        await chat_tts_queue.join()
+
+    async def reset_chat_tts_state():
+        nonlocal chat_sentence_buffer, chat_tts_failed, chat_tts_playback_started, chat_turn_finished
+        chat_sentence_buffer = ""
+        chat_tts_failed = False
+        chat_tts_playback_started = False
+        chat_turn_finished = False
+        chat_tts_tasks.clear()
+
+    try:
+        while not shutdown_requested:
+            async for response in session.receive():
+                tool_call = getattr(response, "tool_call", None)
+                if tool_call is not None:
+                    calls = getattr(tool_call, "function_calls", None)
+                    if calls:
+                        await handle_tool_call(session, calls)
+
+                content = getattr(response, "server_content", None)
+                if content is None:
+                    continue
+
+                output_transcription = getattr(content, "output_transcription", None)
+                if output_transcription is not None:
+                    text = getattr(output_transcription, "text", None)
+                    if text:
+                        print("💗 Tiểu Vũ:", text, flush=True)
                         if current_mode == CHAT_MODE:
-                            chat_audio_buffer.extend(data)
-                        else:
-                            output.write(data)
+                            chat_transcript_parts.append(text)
+                            chat_sentence_buffer += text
+                            if is_chinese_text(chat_sentence_buffer):
+                                sentences, remainder = split_complete_sentences(chat_sentence_buffer)
+                                for sentence in sentences:
+                                    queue_xiaoxiao_sentence(sentence)
+                                chat_sentence_buffer = remainder
 
-            if getattr(content, "generation_complete", False) or getattr(content, "turn_complete", False):
-                if model_speaking:
-                    if current_mode == CHAT_MODE:
-                        transcript = "".join(chat_transcript_parts).strip()
-                        pcm = None
-                        if is_chinese_text(transcript):
-                            try:
-                                print("🌸 CHAT MODE: dùng giọng nữ XiaoxiaoNeural.", flush=True)
-                                pcm = await synthesize_xiaoxiao_pcm(transcript)
-                            except Exception as exc:
-                                print("⚠️ Xiaoxiao TTS lỗi, dùng audio Gemini dự phòng:", repr(exc), flush=True)
+                model_turn = getattr(content, "model_turn", None)
+                if model_turn is not None:
+                    for part in getattr(model_turn, "parts", []) or []:
+                        inline = getattr(part, "inline_data", None)
+                        data = getattr(inline, "data", None) if inline else None
+                        if data:
+                            if not model_speaking:
+                                model_speaking = True
+                                listen_enabled = False
+                                print("🔊 Tiểu Vũ đang nói...", flush=True)
+                            if current_mode == CHAT_MODE:
+                                chat_audio_buffer.extend(data)
+                            else:
+                                output.write(data)
 
-                        # Chinese Chat Mode uses Xiaoxiao. Vietnamese/other Chat
-                        # Mode replies, or TTS failures, fall back to Gemini audio.
-                        playback = pcm if pcm else bytes(chat_audio_buffer)
-                        # Phát PCM Xiaoxiao thành một buffer liên tục.
-                        # Không chia thành block 100 ms: việc gọi RawOutputStream.write()
-                        # lặp lại nhiều lần có thể tạo khe ngắt audible trên Windows.
-                        output.write(playback)
-                        chat_audio_buffer.clear()
-                        chat_transcript_parts.clear()
+                if (getattr(content, "generation_complete", False)
+                        or getattr(content, "turn_complete", False)) and not chat_turn_finished:
+                    chat_turn_finished = True
 
-                    output.stop()
-                    output.close()
-                    reopen_output()
-                model_speaking = False
-                listen_enabled = True
-                print("\n🎤 Tiểu Vũ đang nghe...", flush=True)
+                    if model_speaking:
+                        if current_mode == CHAT_MODE:
+                            transcript = "".join(chat_transcript_parts).strip()
+
+                            # Nếu câu cuối chưa có dấu câu, đẩy nó vào TTS.
+                            if is_chinese_text(transcript):
+                                await finish_chat_tts()
+
+                            # TTS đã chạy song song từ lúc từng câu hoàn chỉnh xuất hiện.
+                            # Chỉ dùng Gemini audio dự phòng nếu chưa phát Xiaoxiao nào.
+                            if chat_tts_failed and not chat_tts_playback_started:
+                                print("⚠️ Xiaoxiao không dùng được, phát Gemini audio dự phòng.", flush=True)
+                                playback = bytes(chat_audio_buffer)
+                                if playback:
+                                    await asyncio.to_thread(output.write, playback)
+                            elif not chat_tts_tasks and transcript and not is_chinese_text(transcript):
+                                playback = bytes(chat_audio_buffer)
+                                if playback:
+                                    await asyncio.to_thread(output.write, playback)
+
+                            chat_audio_buffer.clear()
+                            chat_transcript_parts.clear()
+                            await reset_chat_tts_state()
+
+                        output.stop()
+                        output.close()
+                        reopen_output()
+
+                    model_speaking = False
+                    listen_enabled = True
+                    print("\n🎤 Tiểu Vũ đang nghe...", flush=True)
+    finally:
+        chat_tts_worker_task.cancel()
+        await asyncio.gather(chat_tts_worker_task, return_exceptions=True)
+
 
 
 def reopen_output():
