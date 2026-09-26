@@ -285,45 +285,30 @@ _original_send_text = voice.send_text
 
 
 def _time_aware_startup_greeting():
-    """Tạo ngữ cảnh lời chào theo giờ máy lúc Tiểu Vũ được kích hoạt."""
+    """根据本地时间生成一句自然的中文朋友式问候。"""
     hour = datetime.datetime.now().hour
-
-    if hour == 23:
-        return "Chào Lão sư! Khuya rồi, Lão sư vẫn còn thức làm việc à?"
-    if 0 <= hour <= 4:
-        return "Chào Lão sư! Giờ này khuya lắm rồi, Lão sư vẫn còn thức à?"
     if 5 <= hour <= 11:
-        return "Chào Lão sư! Chào buổi sáng! Hôm nay Lão sư thấy thế nào ạ?"
+        return "早上好！今天过得怎么样？"
     if hour == 12:
-        return "Chào Lão sư! Chào buổi trưa! Lão sư dùng bữa và nghỉ ngơi chưa ạ?"
+        return "中午好！吃饭了吗？"
     if 13 <= hour <= 17:
-        return "Chào Lão sư! Chào buổi chiều! Hôm nay công việc của Lão sư ổn chứ ạ?"
+        return "下午好！今天忙不忙呀？"
     if 18 <= hour <= 22:
-        return "Chào Lão sư! Chào buổi tối! Hôm nay Lão sư có mệt không ạ?"
-
-    return "Chào Lão sư! Hôm nay Lão sư thấy thế nào ạ?"
+        return "晚上好！今天累不累？"
+    return "这么晚还没休息呀？今天怎么样？"
 
 
 async def _send_text_with_startup_guard(session, text):
-    if text.strip() == "Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới.":
+    if text.strip() == "Chào Lão sư thật ngắn gọn và tự nhiên. Không hỏi câu hỏi mới." or text.strip().startswith("XIAOYU_CHAT_MODE_BOOT:"):
         greeting = _time_aware_startup_greeting()
         text = f"""
-Tiểu Vũ vừa được kích hoạt và đang ở CHAT MODE với Lão sư Minh Tâm.
-
-TÍNH CÁCH:
-- Thân thiện, vui vẻ, gần gũi, tự nhiên; không máy móc, không quá trang trọng.
-- Luôn nhớ Lão sư là người đang nói chuyện với Tiểu Vũ.
-
-LỜI CHÀO KÍCH HOẠT:
-- Câu đầu tiên BẮT BUỘC phải bắt đầu chính xác bằng: "Chào Lão sư!"
-- Sau đó dùng lời chào theo thời gian hiện tại: "{greeting}"
-- Có thể diễn đạt tự nhiên, vui vẻ, nhưng không được bỏ câu "Chào Lão sư!".
-- Sau lời chào, hỏi thăm Lão sư một câu ngắn phù hợp thời điểm trong ngày.
-- Không hỏi bài học, không gọi học sinh, không chuyển sang Tutor Mode.
-- Chỉ chào hỏi và hỏi thăm, sau đó DỪNG để chờ Lão sư nói tiếp.
+CHAT MODE 启动。你现在是小雨（Xiǎo Yǔ），是 Lão sư 的中文朋友。
+请根据当前时间，用自然、亲切、简单的中文主动打招呼，并开启一个很轻松的话题。
+只说一句或两句短话，最多问一个问题；不要自我介绍，不要解释规则，不要教学，不要使用越南语。
+说完立即停止，等待 Lão sư 回应。
+可自然参考这句问候："{greeting}"
 """
     await _original_send_text(session, text)
-
 
 voice.process_user_text = _process_user_text_with_memory
 voice.send_text = _send_text_with_startup_guard
