@@ -745,8 +745,10 @@ async def receive_loop(session):
                         # Chinese Chat Mode uses Xiaoxiao. Vietnamese/other Chat
                         # Mode replies, or TTS failures, fall back to Gemini audio.
                         playback = pcm if pcm else bytes(chat_audio_buffer)
-                        for offset in range(0, len(playback), 4800):
-                            output.write(playback[offset:offset + 4800])
+                        # Phát PCM Xiaoxiao thành một buffer liên tục.
+                        # Không chia thành block 100 ms: việc gọi RawOutputStream.write()
+                        # lặp lại nhiều lần có thể tạo khe ngắt audible trên Windows.
+                        output.write(playback)
                         chat_audio_buffer.clear()
                         chat_transcript_parts.clear()
 
