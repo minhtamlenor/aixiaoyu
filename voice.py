@@ -749,6 +749,10 @@ async def receive_loop(session):
                     text = getattr(output_transcription, "text", None)
                     if text:
                         print("💗 Tiểu Vũ:", text, flush=True)
+                        if current_mode == CHAT_MODE and not model_speaking:
+                            model_speaking = True
+                            listen_enabled = False
+                            print("🔊 Tiểu Vũ đang nói...", flush=True)
                         if current_mode == CHAT_MODE:
                             chat_transcript_parts.append(text)
                             chat_sentence_buffer += text
@@ -773,8 +777,7 @@ async def receive_loop(session):
                             else:
                                 output.write(data)
 
-                if (getattr(content, "generation_complete", False)
-                        or getattr(content, "turn_complete", False)) and not chat_turn_finished:
+                if getattr(content, "turn_complete", False) and not chat_turn_finished:
                     chat_turn_finished = True
 
                     if model_speaking:
