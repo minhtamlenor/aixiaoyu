@@ -13,6 +13,7 @@ from google import genai
 from google.genai import types
 
 from personality import SYSTEM_INSTRUCTION as PERSONALITY_INSTRUCTION
+from chat_tts import is_chinese_text, synthesize_xiaoxiao_pcm
 from tools.time_tool import get_time_text
 from tools.calculator import calculate
 from tools.calendar_tool import get_calendar_text
@@ -688,6 +689,12 @@ async def microphone_loop(session):
 async def receive_loop(session):
     global listen_enabled, model_speaking, shutdown_requested
 
+    # Chat Mode buffers one short response so Mandarin can use the same
+    # XiaoxiaoNeural voice as the Xiang Xiang HSK project. Tutor Mode keeps
+    # the existing Gemini streaming audio path unchanged.
+    chat_audio_buffer = bytearray()
+    chat_transcript_parts = []
+
     while not shutdown_requested:
         async for response in session.receive():
             tool_call = getattr(response, "tool_call", None)
@@ -705,6 +712,8 @@ async def receive_loop(session):
                 text = getattr(output_transcription, "text", None)
                 if text:
                     print("💗 Tiểu Vũ:", text, flush=True)
+                    if current_mode == CHAT_MODE:
+                        chat_transcript_parts.append(text)
 
             model_turn = getattr(content, "model_turn", None)
             if model_turn is not None:
@@ -716,10 +725,31 @@ async def receive_loop(session):
                             model_speaking = True
                             listen_enabled = False
                             print("🔊 Tiểu Vũ đang nói...", flush=True)
-                        output.write(data)
+                        if current_mode == CHAT_MODE:
+                            chat_audio_buffer.extend(data)
+                        else:
+                            output.write(data)
 
             if getattr(content, "turn_complete", False):
                 if model_speaking:
+                    if current_mode == CHAT_MODE:
+                        transcript = "".join(chat_transcript_parts).strip()
+                        pcm = None
+                        if is_chinese_text(transcript):
+                            try:
+                                print("🌸 CHAT MODE: dùng giọng nữ XiaoxiaoNeural.", flush=True)
+                                pcm = await synthesize_xiaoxiao_pcm(transcript)
+                            except Exception as exc:
+                                print("⚠️ Xiaoxiao TTS lỗi, dùng audio Gemini dự phòng:", repr(exc), flush=True)
+
+                        # Chinese Chat Mode uses Xiaoxiao. Vietnamese/other Chat
+                        # Mode replies, or TTS failures, fall back to Gemini audio.
+                        playback = pcm if pcm else bytes(chat_audio_buffer)
+                        for offset in range(0, len(playback), 4800):
+                            output.write(playback[offset:offset + 4800])
+                        chat_audio_buffer.clear()
+                        chat_transcript_parts.clear()
+
                     output.stop()
                     output.close()
                     reopen_output()
