@@ -6,12 +6,24 @@ zh-CN-XiaoxiaoNeural. The existing Gemini audio path remains the fallback.
 import asyncio
 import shutil
 import tempfile
+import re
 from pathlib import Path
 
 import edge_tts
 
 
 VOICE = "zh-CN-XiaoxiaoNeural"
+
+
+def split_complete_sentences(text: str):
+    """Return complete Mandarin sentences and the unfinished remainder."""
+    parts = re.split(r"(?<=[。！？!?])", text or "")
+    if not parts:
+        return [], ""
+    remainder = parts.pop() if not re.search(r"[。！？!?]$", parts[-1] if parts else "") else ""
+    if remainder and not parts:
+        return [], remainder
+    return [part.strip() for part in parts if part.strip()], remainder.strip()
 
 
 def is_chinese_text(text: str) -> bool:
