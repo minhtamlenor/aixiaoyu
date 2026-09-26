@@ -519,14 +519,49 @@ def _create_whisper_result(language=None):
 
 
 def transcribe(pcm: bytes) -> dict:
-    """Một lượt Whisper chất lượng cao; không chạy thêm fallback zh gây trễ và dễ nhận sai."""
+    """Whisper auto trước; chỉ chạy thêm zh khi kết quả auto có dấu hiệu nhận sai tiếng Trung."""
     language = _stt_language()
+    audio_wav = pcm_to_wav(pcm)
+
     base_kwargs = _create_whisper_result(language)
-    base_kwargs["file"] = ("xiaoyu.wav", pcm_to_wav(pcm))
+    base_kwargs["file"] = ("xiaoyu.wav", audio_wav)
 
     result = groq.audio.transcriptions.create(**base_kwargs)
     text = clean_whisper_text(getattr(result, "text", "") or "")
     quality_ok, quality_reason = _whisper_quality(result, text)
+
+    if language is None:
+        detected_language = (getattr(result, "language", "") or "").lower().strip()
+
+        # Với câu tiếng Trung ngắn, Whisper auto đôi khi nhận nhầm thành
+        # tiếng Anh/pinyin ("Wah pooh", "wo...", ...). Khi đó thử đúng
+        # Mandarin một lần và chỉ nhận nếu kết quả thực sự có dấu hiệu tiếng Trung.
+        suspicious_chinese = (
+            not text
+            or not quality_ok
+            or (
+                not _has_chinese_characters(text)
+                and detected_language not in {"vi", "vietnamese"}
+            )
+        )
+
+        if suspicious_chinese:
+            try:
+                zh_kwargs = _create_whisper_result("zh")
+                zh_kwargs["file"] = ("xiaoyu.wav", audio_wav)
+                zh_result = groq.audio.transcriptions.create(**zh_kwargs)
+                zh_text = clean_whisper_text(getattr(zh_result, "text", "") or "")
+                zh_ok, _ = _whisper_quality(zh_result, zh_text)
+
+                if zh_ok and _is_likely_chinese_transcript(zh_text):
+                    return {
+                        "text": zh_text,
+                        "reason": "ok",
+                        "language": "zh",
+                        "fallback": True,
+                    }
+            except Exception as exc:
+                print("⚠️ Whisper zh fallback lỗi:", repr(exc), flush=True)
 
     if not quality_ok:
         return {"text": "", "reason": quality_reason, "language": language or "auto"}
