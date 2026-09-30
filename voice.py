@@ -527,8 +527,14 @@ def transcribe(pcm: bytes) -> dict:
     base_kwargs["file"] = ("xiaoyu.wav", audio_wav)
 
     result = groq.audio.transcriptions.create(**base_kwargs)
-    text = clean_whisper_text(getattr(result, "text", "") or "")
+    raw_text = getattr(result, "text", "") or ""
+    text = clean_whisper_text(raw_text)
+    detected_language = (getattr(result, "language", "") or "").lower().strip()
     quality_ok, quality_reason = _whisper_quality(result, text)
+    print(
+        f"🔬 Whisper base: model={STT_MODEL} | requested_lang={language or \"auto\"} | detected_lang={detected_language or \"?\"} | quality={quality_reason} | raw={raw_text!r}",
+        flush=True,
+    )
 
     if language is None:
         detected_language = (getattr(result, "language", "") or "").lower().strip()
@@ -550,8 +556,13 @@ def transcribe(pcm: bytes) -> dict:
                 zh_kwargs = _create_whisper_result("zh")
                 zh_kwargs["file"] = ("xiaoyu.wav", audio_wav)
                 zh_result = groq.audio.transcriptions.create(**zh_kwargs)
-                zh_text = clean_whisper_text(getattr(zh_result, "text", "") or "")
-                zh_ok, _ = _whisper_quality(zh_result, zh_text)
+                zh_raw_text = getattr(zh_result, "text", "") or ""
+                zh_text = clean_whisper_text(zh_raw_text)
+                zh_ok, zh_reason = _whisper_quality(zh_result, zh_text)
+                print(
+                    f"🔬 Whisper zh fallback: quality={zh_reason} | raw={zh_raw_text!r}",
+                    flush=True,
+                )
 
                 if zh_ok and _is_likely_chinese_transcript(zh_text):
                     return {
@@ -667,8 +678,10 @@ async def microphone_loop(session):
             listen_enabled = False
             preroll.clear()
 
+            raw_ms = len(audio) / 2 / INPUT_RATE * 1000
             clean_audio = trim_silence(bytes(audio))
             clean_ms = len(clean_audio) / 2 / INPUT_RATE * 1000
+            print(f"📊 VAD audio: raw={raw_ms:.0f} ms | clean={clean_ms:.0f} ms | end_silence={END_SILENCE_MS} ms", flush=True)
 
             if clean_ms < MIN_SPEECH_MS:
                 print("🔴 MIC: đoạn tiếng quá ngắn / gần như im lặng, bỏ qua", flush=True)
