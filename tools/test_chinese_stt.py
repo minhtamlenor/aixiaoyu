@@ -306,6 +306,12 @@ def main() -> int:
         default=DEFAULT_THRESHOLD,
         help=f"VAD RMS threshold (default: {DEFAULT_THRESHOLD})",
     )
+    parser.add_argument(
+        "--end-silence",
+        type=int,
+        default=DEFAULT_END_SILENCE_MS,
+        help=f"Silence duration that ends a recording in ms (default: {DEFAULT_END_SILENCE_MS})",
+    )
     parser.add_argument("--list-mics", action="store_true", help="List microphones and exit.")
     args = parser.parse_args()
 
@@ -365,7 +371,7 @@ def main() -> int:
                 device=args.mic,
                 threshold=args.threshold,
                 start_ms=DEFAULT_START_MS,
-                end_silence_ms=DEFAULT_END_SILENCE_MS,
+                end_silence_ms=args.end_silence,
                 preroll_frames=DEFAULT_PREROLL_FRAMES,
                 min_speech_ms=DEFAULT_MIN_SPEECH_MS,
                 max_speech_ms=DEFAULT_MAX_SPEECH_MS,
