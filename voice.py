@@ -419,11 +419,11 @@ def trim_silence(pcm: bytes, threshold=120):
 
 
 def _stt_language():
-    """Chinese mode forces Mandarin; normal chat uses auto-detection."""
+    """Chat và học tiếng Trung ưu tiên Mandarin; môn khác dùng tiếng Việt."""
+    if current_mode == CHAT_MODE:
+        return "zh"
     if current_subject == "chinese":
         return "zh"
-    if current_mode == CHAT_MODE:
-        return None
     return "vi"
 
 
@@ -519,7 +519,7 @@ def _create_whisper_result(language=None):
 
 
 def transcribe(pcm: bytes) -> dict:
-    """Whisper auto trước; chỉ chạy thêm zh khi kết quả auto có dấu hiệu nhận sai tiếng Trung."""
+    """Whisper dùng ngôn ngữ cố định theo mode để tránh auto-detect nhầm tiếng Trung."""
     language = _stt_language()
     audio_wav = pcm_to_wav(pcm)
 
@@ -917,7 +917,7 @@ QUY TẮC LỚP TAI / WHISPER:
 - Tuyệt đối không tự sinh câu quảng cáo, YouTube, subscribe, giới thiệu video hoặc câu mẫu khi người dùng im lặng.
 - Nếu chỉ có tiếng nền hoặc Whisper không chắc đó là lời nói, bỏ qua và tiếp tục nghe.
 - Nếu có dấu hiệu người thật đang nói nhưng transcript quá mơ hồ, hãy nói ngắn: "Tiểu Vũ nghe nè, Lão sư nói lại giúp Tiểu Vũ nha." rồi chờ lại.
-- Khi CHAT MODE có thể nói tiếng Việt hoặc tiếng Trung, Whisper được phép tự nhận diện ngôn ngữ và có một lượt fallback Mandarin khi câu ngắn/mơ hồ.
+- Khi CHAT MODE, Whisper ưu tiên Mandarin (zh) để cuộc trò chuyện tiếng Trung ổn định và không bị auto-detect nhầm ngôn ngữ.
 - Khi TUTOR MODE / CHINESE CONVERSATION MODE đang ở môn tiếng Trung, Whisper ưu tiên Mandarin (zh) để không biến tiếng Trung thành tiếng Việt.
 """
 
