@@ -342,7 +342,7 @@ def main() -> int:
     client = Groq(api_key=api_key)
 
     print(
-        "\nMỗi lượt: chờ màn hình hiện 🟢 rồi đọc câu. "
+        "\nMỗi lượt: script tự động nghe. Khi thấy 🟢, hãy đọc câu. "
         "Không cần nhấn Enter.",
         flush=True,
     )
@@ -358,7 +358,7 @@ def main() -> int:
             print(f"🔤 Pinyin    : {pinyin}")
             print(f"🇻🇳 Nghĩa     : {meaning}")
             print("-" * 72)
-            input("Nhấn ENTER để bắt đầu nghe...")
+            print("🎤 Hãy nói ngay sau khi thấy 🟢 Bắt đầu bắt tiếng...", flush=True)
 
             started = time.perf_counter()
             pcm = record_until_silence(
