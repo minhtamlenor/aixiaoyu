@@ -532,7 +532,7 @@ def transcribe(pcm: bytes) -> dict:
     detected_language = (getattr(result, "language", "") or "").lower().strip()
     quality_ok, quality_reason = _whisper_quality(result, text)
     print(
-        f"🔬 Whisper base: model={STT_MODEL} | requested_lang={language or \"auto\"} | detected_lang={detected_language or \"?\"} | quality={quality_reason} | raw={raw_text!r}",
+        f"🔬 Whisper base: model={STT_MODEL} | requested_lang={language or 'auto'} | detected_lang={detected_language or '?'} | quality={quality_reason} | raw={raw_text!r}",
         flush=True,
     )
 
